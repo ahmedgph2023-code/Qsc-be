@@ -1,0 +1,125 @@
+{
+  "version": "7",
+  "dialect": "postgresql",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "7",
+      "when": 1780470962607,
+      "tag": "0000_lean_veda",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1785825121561,
+      "tag": "0001_phase1_core",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1786512000000,
+      "tag": "0002_index_ohlc",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1786515600000,
+      "tag": "0003_mandate_rejected",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1786520000000,
+      "tag": "0004_trade_cash",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1786830000000,
+      "tag": "0006_admin_ui_preferences",
+      "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1786910356396,
+      "tag": "0007_customer_kyc_fields",
+      "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1786930000000,
+      "tag": "0008_shariah_binary",
+      "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1786940000000,
+      "tag": "0009_client_transfer",
+      "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1786950000000,
+      "tag": "0010_ca_app_client_unique",
+      "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1786960000000,
+      "tag": "0011_historical_imports",
+      "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "7",
+      "when": 1786970000000,
+      "tag": "0012_phase2_trading",
+      "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "7",
+      "when": 1786980000000,
+      "tag": "0013_phase3_research",
+      "breakpoints": true
+    },
+    {
+      "idx": 14,
+      "version": "7",
+      "when": 1786990000000,
+      "tag": "0014_phase4_advanced",
+      "breakpoints": true
+    },
+    {
+      "idx": 15,
+      "version": "7",
+      "when": 1787000000000,
+      "tag": "0015_system_settings",
+      "breakpoints": true
+    },
+    {
+      "idx": 16,
+      "version": "7",
+      "when": 1787010000000,
+      "tag": "0016_portfolio_formulas",
+      "breakpoints": true
+    },
+    {
+      "idx": 17,
+      "version": "7",
+      "when": 1787020000000,
+      "tag": "0017_trade_price_scale",
+      "breakpoints": true
+    }
+  ]
+}

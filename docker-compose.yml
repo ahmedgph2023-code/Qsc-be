@@ -1,0 +1,15 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: qse-postgres
+    environment:
+      POSTGRES_USER: qse
+      POSTGRES_PASSWORD: qse_password
+      POSTGRES_DB: qse
+    ports:
+      - "5433:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+volumes:
+  pgdata:

@@ -1,0 +1,9 @@
+node_modules
+dist
+uploads/*
+!uploads/.gitkeep
+.DS_Store
+.tmp-pdf/
+.env
+.env.*
+!.env.example

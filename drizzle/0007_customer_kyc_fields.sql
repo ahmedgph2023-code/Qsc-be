@@ -1,0 +1,12 @@
+CREATE TYPE "public"."client_type" AS ENUM('individual', 'company');
+CREATE TYPE "public"."gender" AS ENUM('male', 'female');
+ALTER TABLE "customers" ADD COLUMN IF NOT EXISTS "client_type" "client_type" DEFAULT 'individual' NOT NULL;
+ALTER TABLE "customers" ADD COLUMN IF NOT EXISTS "title" varchar(20);
+ALTER TABLE "customers" ADD COLUMN IF NOT EXISTS "gender" "gender";
+ALTER TABLE "customers" ADD COLUMN IF NOT EXISTS "birthdate" date;
+ALTER TABLE "customers" ADD COLUMN IF NOT EXISTS "nationality" varchar(120);
+ALTER TABLE "customers" ADD COLUMN IF NOT EXISTS "mobile_number" varchar(30);
+ALTER TABLE "customers" ADD COLUMN IF NOT EXISTS "city" varchar(120);
+ALTER TABLE "customers" ADD COLUMN IF NOT EXISTS "country" varchar(120);
+ALTER TABLE "customers" ADD COLUMN IF NOT EXISTS "id_number" varchar(60);
+ALTER TABLE "customers" ADD COLUMN IF NOT EXISTS "id_validity" date;
