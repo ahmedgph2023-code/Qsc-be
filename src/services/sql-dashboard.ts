@@ -124,7 +124,12 @@ export async function getSqlFirmOverview(asOf?: string) {
     .slice(0, TRAJECTORY_DAYS)
     .reverse();
 
-  const dayAggs = await Promise.all(dateWindow.map((d) => aggregateSnapshotDay(d)));
+  // Sequential MSSQL reads — pool max is 10; a parallel date burst plus listExtClients
+  // used to starve connections while Clients (one query) still succeeded.
+  const dayAggs = [];
+  for (const d of dateWindow) {
+    dayAggs.push(await aggregateSnapshotDay(d));
+  }
   const latest = dayAggs.find((d) => d.asOf === resolvedAsOf) ?? (await aggregateSnapshotDay(resolvedAsOf));
   const prior = dayAggs.length >= 2 ? dayAggs[dayAggs.length - 2] : null;
 
@@ -156,10 +161,21 @@ export async function getSqlFirmOverview(asOf?: string) {
       systemCash: r.systemCash ?? 0,
     }));
 
+  // Ledger + DSM/QERI live in different stores. A Postgres/index failure must not
+  // fail the SQL snapshot KPIs (that is what Clients uses MSSQL for).
   const [ledger, dsm, qeri] = await Promise.all([
-    listExtClients(resolvedAsOf),
-    loadIndexSpark("DSM"),
-    loadIndexSpark("QERI"),
+    listExtClients(resolvedAsOf).catch((err) => {
+      console.error("[sql-dashboard] listExtClients failed; snapshot KPIs still returned", err);
+      return [] as Awaited<ReturnType<typeof listExtClients>>;
+    }),
+    loadIndexSpark("DSM").catch((err) => {
+      console.error("[sql-dashboard] DSM spark failed", err);
+      return null;
+    }),
+    loadIndexSpark("QERI").catch((err) => {
+      console.error("[sql-dashboard] QERI spark failed", err);
+      return null;
+    }),
   ]);
 
   const shareTxRows = ledger.reduce((s, r) => s + Number(r.shareCount || 0), 0);

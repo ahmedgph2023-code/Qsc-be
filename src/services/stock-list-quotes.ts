@@ -31,6 +31,7 @@ export async function loadStockListQuotes(
         price,
         ROW_NUMBER() OVER (PARTITION BY stock_id ORDER BY date DESC) AS rn
       FROM stock_prices
+      WHERE stock_id IN (${sql.join(stockIds.map((id) => sql`${id}`), sql`, `)})
     ) ranked
     WHERE rn <= 30
   `);
