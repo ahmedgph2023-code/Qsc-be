@@ -114,14 +114,16 @@ Print: browser print stylesheet or export button.
 - Unlocked. Not the locked `/reports` AUM/IC packs.
 - Investor picker (SQL `getExtClients`), statement kind, as-of or from/to.
 - Preview tables from `GET /api/ext/clients/:id/statements/…` — UI does not recompute money.
+- Portfolio kind: eight `StatsSummaryBar` KPIs above the holdings table (same chrome as Customer Detail). Unsigned footer cells stay `—` (P2-FOOTER).
+- Client / kind / as-of (or from–to) sit in the statement `DataTableToolbar` (same table-card header as Clients / Stocks). Generate stays in the page header.
 - Entry from `CustomerDetailExt` with current as-of.
-- Print window in Step 7 is a screen dump; trading-system PDF layout is Step 8.
+- Print window in Step 7 is a screen dump; trading-system PDF layout is Step 8. Header actions: PDF (browser print) + Excel download + Generate, using the shared `Button` outline/primary sizes (not oversized custom pills).
 
 ### 2.11 Daily balance match `/balances`
 
 - Unlocked. Not the locked Phase-2 `/reconciliation` stub.
-- As-of date + Run compare (`snapshot.run`: admin/pm/approver/compliance). Viewer (accountant mapping) can read.
-- Payload from `GET /api/snapshots` — UI does not recompute money.
+- As-of date + status + QSC date chips sit in the table `DataTableToolbar` (same statement-card chrome as `/statements` realized summary). Run compare stays in the page header (`snapshot.run`: admin/pm/approver/compliance). Viewer (accountant mapping) can read.
+- KPI count cards above the table; table + 10/25/50 paging in one inner card. Payload from `GET /api/snapshots` — UI does not recompute money.
 - Shows QSC PortfolioValue vs IPMS MV and vs MV+cash; QSC SystemCash vs IPMS cash; QSC BankBalance with IPMS bank unknown.
 - Open questions from `GET /api/balance-questions` (unsigned PV/bank/role). Does not invent a bank ledger or accountant role.
 

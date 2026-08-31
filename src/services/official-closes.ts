@@ -357,3 +357,126 @@ export async function officialClosesSummary() {
     },
   };
 }
+
+/** Bloomberg-style header e.g. `MHAR QD Equity` → `MHAR`. */
+export function bloombergEquityTicker(header: string): string | null {
+  const m = String(header || "").trim().match(/^([A-Za-z0-9]+)\s+QD\s+Equity$/i);
+  return m ? m[1].toUpperCase() : null;
+}
+
+function isoDateCell(value: unknown): string | null {
+  if (value == null || value === "") return null;
+  if (value instanceof Date && !Number.isNaN(value.getTime())) {
+    return value.toISOString().slice(0, 10);
+  }
+  const s = String(value).trim();
+  if (/^\d{4}-\d{2}-\d{2}/.test(s)) return s.slice(0, 10);
+  return null;
+}
+
+/**
+ * Parse `Last price ` sheet from AI / Bloomberg wide workbook.
+ * Row 0 = tickers, row 1 = labels, row 2+ = dates + closes. Skips DSM/QERI index columns.
+ */
+export function parseBloombergLastPriceRows(
+  rows: unknown[][],
+  opts?: { fromDate?: string },
+): { rows: ParsedPrice[]; skipped: number; tickers: string[] } {
+  const fromDate = opts?.fromDate;
+  if (!rows.length) return { rows: [], skipped: 0, tickers: [] };
+  const headers = rows[0] || [];
+  const cols: { index: number; ticker: string }[] = [];
+  for (let i = 1; i < headers.length; i++) {
+    const ticker = bloombergEquityTicker(String(headers[i] ?? ""));
+    if (ticker) cols.push({ index: i, ticker });
+  }
+  const out: ParsedPrice[] = [];
+  let skipped = 0;
+  for (let r = 2; r < rows.length; r++) {
+    const row = rows[r] || [];
+    const date = isoDateCell(row[0]);
+    if (!date) {
+      skipped += 1;
+      continue;
+    }
+    if (fromDate && date < fromDate) continue;
+    for (const col of cols) {
+      const raw = row[col.index];
+      if (raw == null || raw === "") {
+        skipped += 1;
+        continue;
+      }
+      const price = typeof raw === "number" ? raw : Number(String(raw).replace(/,/g, ""));
+      if (!Number.isFinite(price) || price <= 0) {
+        skipped += 1;
+        continue;
+      }
+      out.push({ ticker: col.ticker, date, price });
+    }
+  }
+  return { rows: out, skipped, tickers: cols.map((c) => c.ticker) };
+}
+
+export function defaultAiBloombergPricesPath(): string {
+  const here = path.dirname(fileURLToPath(import.meta.url));
+  return path.resolve(here, "../../../files/AI prices as of 30.08.2026.xlsx");
+}
+
+/** Import official closes from client AI/Bloomberg workbook (س-22 file 2026-08-30). */
+export async function importAiBloombergOfficialCloses(opts: {
+  filePath?: string;
+  sheetName?: string;
+  fromDate?: string;
+  userId?: string | null;
+}): Promise<{
+  filePath: string;
+  sheetName: string;
+  parsed: number;
+  skippedParse: number;
+  upserted: number;
+  unknownTickers: number;
+  unknownSample: string[];
+  tickers: string[];
+  fromDate: string;
+}> {
+  const XLSX = (await import("xlsx")).default;
+  const filePath = opts.filePath || defaultAiBloombergPricesPath();
+  await fs.access(filePath);
+  const wb = XLSX.readFile(filePath, { cellDates: true });
+  const sheetName =
+    opts.sheetName ||
+    wb.SheetNames.find((n) => /^last\s*price/i.test(n.trim())) ||
+    wb.SheetNames[0];
+  const sheet = wb.Sheets[sheetName];
+  if (!sheet) throw new Error(`Sheet not found: ${sheetName}`);
+  const matrix = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: null }) as unknown[][];
+  const fromDate = opts.fromDate ?? "2026-08-19";
+  const parsed = parseBloombergLastPriceRows(matrix, { fromDate });
+  const result = await upsertParsedOfficialCloses(parsed.rows);
+  await writeAudit({
+    userId: opts.userId ?? null,
+    action: "update",
+    objectType: "stock_prices",
+    objectId: null,
+    newValue: {
+      source: filePath,
+      sheetName,
+      fromDate,
+      parsed: parsed.rows.length,
+      skippedParse: parsed.skipped,
+      ...result,
+    },
+    reason: "Import official closes from AI Bloomberg Last price workbook (س-22)",
+  });
+  return {
+    filePath,
+    sheetName,
+    parsed: parsed.rows.length,
+    skippedParse: parsed.skipped,
+    upserted: result.upserted,
+    unknownTickers: result.unknownTickers,
+    unknownSample: result.unknownSample,
+    tickers: parsed.tickers,
+    fromDate,
+  };
+}

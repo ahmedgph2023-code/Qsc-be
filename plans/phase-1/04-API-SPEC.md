@@ -48,7 +48,7 @@ Convention: JSON bodies; UUIDs; ISO dates; amounts as strings or numbers consist
 | GET | `/ext/clients/:id/statements/account` | any authenticated | account statement JSON (`?from=` `&to=` required) |
 | GET | `/ext/clients/:id/statements/realized-summary` | any authenticated | realized P&L summary JSON (`?from=` `&to=` required; dividend/footer unknowns stay null) |
 | GET | `/ext/clients/:id/statements/realized-details` | any authenticated | realized P&L blotter JSON (`?from=` `&to=` required) |
-| GET | `/ext/clients/:id/statements/portfolio.xlsx` | any authenticated | portfolio statement workbook |
+| GET | `/ext/clients/:id/statements/portfolio.xlsx` | any authenticated | One-sheet workbook (identity + holdings + recap). Unsigned footer cells stay blank. |
 | GET | `/ext/clients/:id/statements/account.xlsx` | any authenticated | account statement workbook (`?from=` `&to=` required) |
 | GET | `/ext/clients/:id/statements/realized-summary.xlsx` | any authenticated | realized P&L summary workbook |
 | GET | `/ext/clients/:id/statements/realized-details.xlsx` | any authenticated | realized P&L blotter workbook |

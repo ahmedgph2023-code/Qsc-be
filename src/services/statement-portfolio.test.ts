@@ -13,8 +13,9 @@ const investor = buildInvestorHeader({
 });
 
 describe("portfolio statement engine", () => {
-  it("values MHAR with official close and does not invent sell commission", () => {
+  it("values MHAR with official close and client footer formulas (س-01…س-04)", () => {
     const p = UAT_PORTFOLIO_2024_12_01;
+    const cash = p.drCrBalance;
     const stmt = assemblePortfolioStatement({
       asOf: p.asOf,
       investor,
@@ -25,10 +26,10 @@ describe("portfolio statement engine", () => {
         compId: p.compId,
         quantity: p.quantity,
         totalCost: p.costValue,
-        avgCost: p.costValue / p.quantity,
+        avgCost: p.shareCostPrinted,
       }],
       closes: new Map([[p.ticker, { price: p.closePrice, date: p.asOf }]]),
-      cashLedgerBalance: 100,
+      cashLedgerBalance: cash,
       realizedToAsOf: p.realizedTradingPl,
       printedAtIso: "2026-08-21T07:51:15.000Z",
     });
@@ -38,17 +39,20 @@ describe("portfolio statement engine", () => {
     expect(line.priceSource).toBe("official_close");
     expect(line.compId).toBe(8037);
     expect(line.unrealizedGross).toBeCloseTo(p.marketValue - p.costValue, 2);
-    expect(line.displayedProfit.source).toBe("unknown");
-    expect(line.displayedProfit.reason).toBe("EXPECTED_SELL_COMM_RULE");
-    expect(line.breakEven.reason).toBe("BREAK_EVEN_RULE");
+    expect(line.breakEven.value).toBeCloseTo(p.breakEvenPrinted, 3);
+    expect(line.displayedProfit.value).toBeCloseTo(p.profitPrinted, 2);
     expect(stmt.grandTotalMarketValue).toBe(p.marketValue);
     expect(stmt.footer.marketValue.value).toBe(p.marketValue);
-    expect(stmt.footer.expectedSellCommission.value).toBeNull();
-    expect(stmt.footer.netAssetValue.value).toBeNull();
-    expect(stmt.footer.cashLedgerBalance.value).toBe(100);
+    expect(stmt.footer.expectedSellCommission.value).toBeCloseTo(p.expectedSellComm, 2);
+    expect(stmt.footer.netAfterExpectedSellComm.value).toBeCloseTo(p.netAfterSellComm, 2);
+    expect(stmt.footer.expectedProfitLoss.value).toBeCloseTo(p.profitPrinted, 2);
+    expect(stmt.footer.cashLedgerBalance.value).toBe(cash);
+    expect(stmt.footer.drCrBalance.value).toBe(cash);
+    expect(stmt.footer.clientNetCashBalance.value).toBe(cash);
     expect(stmt.footer.realizedTradingPl.value).toBe(p.realizedTradingPl);
+    expect(stmt.footer.netProfitLoss.value).toBeCloseTo(p.profitPrinted + p.realizedTradingPl, 2);
+    expect(stmt.footer.netAssetValue.value).toBeCloseTo(p.marketValue - p.expectedSellComm + cash, 2);
     expect(stmt.missingCloses).toEqual([]);
-    expect(stmt.footer.drCrBalance.reason).toBe("DR_CR_VS_CASH");
   });
 
   it("does not treat a prior-day close as the official as-of close", () => {

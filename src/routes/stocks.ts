@@ -19,6 +19,7 @@ import {
 import { getPortfolioHoldings } from "../services/calculations.js";
 import { param } from "../utils/params.js";
 import { parseShariahGroupInput } from "../services/mandate-rules.js";
+import { listStockMovers, loadStockListQuotes } from "../services/stock-list-quotes.js";
 
 const router = Router();
 router.use(authMiddleware);
@@ -91,17 +92,21 @@ router.patch("/:id/classification", requireRole("admin", "pm"), async (req, res)
 router.get("/", async (_req, res) => {
   try {
     const all = await db.select().from(schema.stocks).orderBy(schema.stocks.ticker);
-    const result = [];
-    for (const s of all) {
-      const latest = await db.select().from(schema.stockPrices).where(eq(schema.stockPrices.stockId, s.id)).orderBy(desc(schema.stockPrices.date)).limit(1);
-      const prev = await db.select().from(schema.stockPrices).where(eq(schema.stockPrices.stockId, s.id)).orderBy(desc(schema.stockPrices.date)).limit(1).offset(1);
-      const cp = latest.length > 0 ? tn(latest[0].price) : 0;
-      const pp = prev.length > 0 ? tn(prev[0].price) : cp;
-      const chg = pp > 0 ? Math.round(((cp - pp) / pp) * 1000000) / 10000 : 0;
-      const spark = (await db.select().from(schema.stockPrices).where(eq(schema.stockPrices.stockId, s.id)).orderBy(desc(schema.stockPrices.date)).limit(30)).reverse().map((p) => tn(p.price));
-      result.push({ ...s, currentPrice: cp, dayChangePct: chg, sparkline: spark });
-    }
+    const quotes = await loadStockListQuotes(all.map((s) => s.id));
+    const result = all.map((s) => ({
+      ...s,
+      ...(quotes.get(s.id) ?? { currentPrice: 0, dayChangePct: 0, sparkline: [] }),
+    }));
     res.json(result);
+  } catch (err: any) { res.status(500).json({ error: err.cause?.message || err.message }); }
+});
+
+/** Top absolute day movers — fast path for dashboard (must stay before /:id). */
+router.get("/movers", async (req, res) => {
+  try {
+    const limit = Math.min(50, Math.max(1, Number(req.query.limit) || 5));
+    const movers = await listStockMovers(limit);
+    res.json(movers);
   } catch (err: any) { res.status(500).json({ error: err.cause?.message || err.message }); }
 });
 

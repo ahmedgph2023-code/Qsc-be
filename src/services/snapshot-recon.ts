@@ -15,7 +15,7 @@ import { cashBalance } from "./ext-sql-portfolio.js";
 import { lotsFromShares } from "./statement-portfolio.js";
 import { todayQatar } from "./fee-engine.js";
 
-/** Two display fils. QSC PortfolioValue definition is unsigned — compare MV and MV+cash separately. */
+/** Two display fils. Client 2026-08-30 (س-34): PortfolioValue = market value only; match status uses mvMatch. */
 export const SNAPSHOT_MATCH_TOLERANCE = 0.01;
 
 export type SnapshotMatchStatus = "matched" | "cash_only" | "mismatch" | "incomplete" | "qsc_missing";
@@ -90,10 +90,10 @@ export function snapshotStatus(input: SnapshotCompareInput): SnapshotMatchStatus
   if (!compared.cashMatch) return "mismatch";
   const noEquity = input.ipmsMarketValue === 0;
   if (noEquity) {
-    if (compared.mvMatch === true || compared.navMatch === true) return "cash_only";
+    if (compared.mvMatch === true) return "cash_only";
     return "mismatch";
   }
-  if (compared.mvMatch === true || compared.navMatch === true) return "matched";
+  if (compared.mvMatch === true) return "matched";
   return "mismatch";
 }
 

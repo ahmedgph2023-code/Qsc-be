@@ -22,6 +22,18 @@ import {
 const round4 = (n: number) => Math.round(n * 10000) / 10000;
 const roundPct = (n: number) => Math.round(n * 1_000_000) / 10_000;
 
+/** Client answer 2026-08-30 (س-01): expected sell commission rate on market value. */
+export const EXPECTED_SELL_COMM_RATE = 0.00275;
+
+function expectedSellCommissionOnMv(marketValue: number): number {
+  return round4(marketValue * EXPECTED_SELL_COMM_RATE);
+}
+
+/** Client answer 2026-08-30 (س-02): sell price where expected P/L is zero after sell commission. */
+export function breakEvenFromAvgCost(avgCost: number): number {
+  return round4(avgCost / (1 - EXPECTED_SELL_COMM_RATE));
+}
+
 export type OfficialClose = {
   price: number;
   date: string;
@@ -73,6 +85,13 @@ function lineFromLot(
   const profitPctGross = unrealizedGross != null && lot.totalCost > 0
     ? roundPct(unrealizedGross / lot.totalCost)
     : null;
+  const lineComm = marketValue != null ? expectedSellCommissionOnMv(marketValue) : null;
+  const displayedProfitValue =
+    marketValue != null && lineComm != null ? round4(marketValue - lineComm - lot.totalCost) : null;
+  const displayedProfitPctValue =
+    displayedProfitValue != null && lot.totalCost > 0
+      ? roundPct(displayedProfitValue / lot.totalCost)
+      : null;
   return {
     lineNo,
     companyName: lot.companyName,
@@ -92,9 +111,11 @@ function lineFromLot(
     currencyDifference: 0,
     sectorCode: null,
     sectorName: lot.sector,
-    breakEven: unknownMoney("BREAK_EVEN_RULE"),
-    displayedProfit: unknownMoney("EXPECTED_SELL_COMM_RULE"),
-    displayedProfitPct: unknownMoney("EXPECTED_SELL_COMM_RULE"),
+    breakEven: lot.quantity > 0 ? engineMoney(breakEvenFromAvgCost(lot.avgCost)) : unknownMoney("BREAK_EVEN_RULE"),
+    displayedProfit:
+      displayedProfitValue == null ? unknownMoney("MISSING_CLOSE") : engineMoney(displayedProfitValue),
+    displayedProfitPct:
+      displayedProfitPctValue == null ? unknownMoney("MISSING_CLOSE") : engineMoney(displayedProfitPctValue),
   };
 }
 
@@ -146,8 +167,24 @@ export function assemblePortfolioStatement(input: {
   const grandTotalMarketValue = allPriced
     ? round4(lines.reduce((s, l) => s + (l.marketValue ?? 0), 0))
     : null;
-  const unknownNav = unknownMoney("DR_CR_VS_CASH");
-  const footerUnknownComm = unknownMoney("EXPECTED_SELL_COMM_RULE");
+  const cash = round4(input.cashLedgerBalance);
+  const cashMoney = sqlMoney(cash);
+  const expectedSellCommission =
+    grandTotalMarketValue == null ? null : expectedSellCommissionOnMv(grandTotalMarketValue);
+  const expectedProfitLoss =
+    grandTotalMarketValue == null || expectedSellCommission == null
+      ? null
+      : round4(grandTotalMarketValue - expectedSellCommission - grandTotalCost);
+  const netAfterExpectedSellComm =
+    grandTotalMarketValue == null || expectedSellCommission == null
+      ? null
+      : round4(grandTotalMarketValue - expectedSellCommission);
+  // س-04: NAV = MV − expected sell commission + client cash
+  const netAssetValue =
+    netAfterExpectedSellComm == null ? null : round4(netAfterExpectedSellComm + cash);
+  // س-03: Dr/Cr and client net cash = cash balance that day
+  const netProfitLoss =
+    expectedProfitLoss == null ? null : round4(expectedProfitLoss + input.realizedToAsOf);
 
   return {
     kind: "portfolio",
@@ -163,19 +200,26 @@ export function assemblePortfolioStatement(input: {
     missingCloses,
     footer: {
       marketValue: grandTotalMarketValue == null ? unknownMoney("MISSING_CLOSE") : engineMoney(grandTotalMarketValue),
-      expectedProfitLoss: footerUnknownComm,
-      expectedSellCommission: footerUnknownComm,
-      netAfterExpectedSellComm: footerUnknownComm,
+      expectedProfitLoss:
+        expectedProfitLoss == null ? unknownMoney("MISSING_CLOSE") : engineMoney(expectedProfitLoss),
+      expectedSellCommission:
+        expectedSellCommission == null
+          ? unknownMoney("MISSING_CLOSE")
+          : engineMoney(expectedSellCommission),
+      netAfterExpectedSellComm:
+        netAfterExpectedSellComm == null
+          ? unknownMoney("MISSING_CLOSE")
+          : engineMoney(netAfterExpectedSellComm),
       currencyDifference: engineMoney(0),
-      drCrBalance: unknownNav,
+      drCrBalance: cashMoney,
       realizedTradingPl: engineMoney(input.realizedToAsOf),
       receivedProfits: unknownMoney("DIVIDEND_SOURCE"),
       nonReceivedProfits: unknownMoney("DIVIDEND_SOURCE"),
       realizedTotal: engineMoney(input.realizedToAsOf),
-      clientNetCashBalance: unknownMoney("DR_CR_VS_CASH"),
-      netProfitLoss: footerUnknownComm,
-      netAssetValue: unknownNav,
-      cashLedgerBalance: sqlMoney(round4(input.cashLedgerBalance)),
+      clientNetCashBalance: cashMoney,
+      netProfitLoss: netProfitLoss == null ? unknownMoney("MISSING_CLOSE") : engineMoney(netProfitLoss),
+      netAssetValue: netAssetValue == null ? unknownMoney("MISSING_CLOSE") : engineMoney(netAssetValue),
+      cashLedgerBalance: cashMoney,
     },
     print: { printedAtIso: input.printedAtIso, page: null },
   };

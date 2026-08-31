@@ -41,7 +41,7 @@ describe("ipmsMarketValue", () => {
 });
 
 describe("snapshotStatus", () => {
-  it("is matched when cash matches and PortfolioValue equals MV or MV+cash", () => {
+  it("is matched when cash matches and PortfolioValue equals MV only (س-34)", () => {
     const mvAligned = compareSnapshot({
       hasQsc: true,
       qscPortfolioValue: 100,
@@ -56,6 +56,7 @@ describe("snapshotStatus", () => {
     expect(mvAligned.navMatch).toBe(false);
     expect(mvAligned.bankMatch).toBeNull();
 
+    // MV+cash alone must not count as matched after client signed PV = market value
     const navAligned = snapshotStatus({
       hasQsc: true,
       qscPortfolioValue: 110,
@@ -65,7 +66,7 @@ describe("snapshotStatus", () => {
       ipmsNavMvPlusCash: 110,
       missingCloses: [],
     });
-    expect(navAligned).toBe("matched");
+    expect(navAligned).toBe("mismatch");
   });
 
   it("is mismatch when cash differs even if MV matches", () => {
