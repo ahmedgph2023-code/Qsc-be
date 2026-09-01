@@ -125,8 +125,8 @@ export type PortfolioStatementFooter = {
 
 export type PortfolioStatement = {
   kind: "portfolio";
-  titleEn: "Expected Profit/loss Summary";
-  titleAr: "كشف المحفظة";
+  titleEn: "Unrealized Profit/Loss Summary";
+  titleAr: "ملخص الأرباح والخسائر غير المحققة";
   company: StatementCompanyHeader;
   investor: StatementInvestorHeader;
   dates: Extract<StatementDateControl, { mode: "as_of" }>;
@@ -291,12 +291,9 @@ export function sqlMoney(value: number): StatementMoney {
   return { value, source: "sql" };
 }
 
+/** Fields still absent from Investors + InvestorsDetails (see dbSchema.md). */
 export const INVESTOR_HEADER_SQL_GAPS = [
-  "poBox",
   "tel",
-  "fax",
-  "address",
-  "city",
   "country",
   "tradingAccountQe",
   "accountTypePrinted",
@@ -343,6 +340,14 @@ export function buildInvestorHeader(input: {
   clientType?: string | null;
   email?: string | null;
   mobile?: string | null;
+  poBox?: string | null;
+  tel?: string | null;
+  fax?: string | null;
+  address?: string | null;
+  city?: string | null;
+  country?: string | null;
+  tradingAccountQe?: string | null;
+  accountTypePrinted?: string | null;
 }): StatementInvestorHeader {
   return {
     nin: input.nin,
@@ -356,13 +361,13 @@ export function buildInvestorHeader(input: {
     clientType: input.clientType ?? null,
     email: input.email ?? null,
     mobile: input.mobile ?? null,
-    poBox: null,
-    tel: null,
-    fax: null,
-    address: null,
-    city: null,
-    country: null,
-    tradingAccountQe: null,
-    accountTypePrinted: null,
+    poBox: input.poBox ?? null,
+    tel: input.tel ?? null,
+    fax: input.fax ?? null,
+    address: input.address ?? null,
+    city: input.city ?? null,
+    country: input.country ?? null,
+    tradingAccountQe: input.tradingAccountQe ?? null,
+    accountTypePrinted: input.accountTypePrinted ?? null,
   };
 }

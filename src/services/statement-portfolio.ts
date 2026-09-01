@@ -188,8 +188,8 @@ export function assemblePortfolioStatement(input: {
 
   return {
     kind: "portfolio",
-    titleEn: "Expected Profit/loss Summary",
-    titleAr: "كشف المحفظة",
+    titleEn: "Unrealized Profit/Loss Summary",
+    titleAr: "ملخص الأرباح والخسائر غير المحققة",
     company: QSC_STATEMENT_COMPANY,
     investor: input.investor,
     dates: { mode: "as_of", asOf: input.asOf },

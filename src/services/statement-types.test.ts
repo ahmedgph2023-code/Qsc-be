@@ -37,7 +37,7 @@ describe("statement contracts", () => {
   });
 
   it("lists investor header fields that live SQL cannot source", () => {
-    expect(INVESTOR_HEADER_SQL_GAPS).toContain("poBox");
+    expect(INVESTOR_HEADER_SQL_GAPS).toContain("country");
     expect(INVESTOR_HEADER_SQL_GAPS).toContain("tradingAccountQe");
     expect(unknownMoney("EXPECTED_SELL_COMM_RULE").value).toBeNull();
     const header = buildInvestorHeader({
@@ -47,9 +47,14 @@ describe("statement contracts", () => {
       displayName: UAT_SAAD.nameAr,
       clientCode: UAT_SAAD.clientCode,
       cAccount: "RAW",
+      poBox: "60398",
+      fax: "97444255227",
+      address: "DOHA",
+      city: "DOHA",
     });
     expect(header.cAccount).toBe("RAW");
-    expect(header.poBox).toBeNull();
+    expect(header.poBox).toBe("60398");
+    expect(header.fax).toBe("97444255227");
     expect(header.tradingAccountQe).toBeNull();
     expect(header.currency).toBe("QAR");
   });

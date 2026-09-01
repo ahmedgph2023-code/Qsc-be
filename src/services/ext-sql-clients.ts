@@ -369,6 +369,42 @@ async function loadInvestor(clientId: number, nin: string) {
   return rows[0] ?? null;
 }
 
+function investorDetailsFromRow(row: Record<string, unknown> | null | undefined) {
+  const addressEn = textOrEmpty(pick(row ?? {}, "CLE_ADDRESS", "cleAddress"));
+  const addressAr = textOrEmpty(pick(row ?? {}, "CLA_ADDRESS", "claAddress"));
+  const cityEn = textOrEmpty(pick(row ?? {}, "E_CITY_NAME", "eCityName"));
+  const cityAr = textOrEmpty(pick(row ?? {}, "CITY_NAME", "cityName"));
+  return {
+    poBox: emptyToNull(textOrEmpty(pick(row ?? {}, "CL_PO_BOX", "clPoBox"))),
+    fax: emptyToNull(textOrEmpty(pick(row ?? {}, "FAX_NUMBER", "faxNumber"))),
+    address: emptyToNull(addressEn || addressAr),
+    city: emptyToNull(cityEn || cityAr),
+  };
+}
+
+async function loadInvestorDetails(clientId: number) {
+  const rows = await queryRows(
+    `
+    SELECT TOP 1 CLA_ADDRESS, CLE_ADDRESS, FAX_NUMBER, CL_PO_BOX, CITY_NAME, E_CITY_NAME
+    FROM InvestorsDetails
+    WHERE LTRIM(RTRIM(CAST(CL_CLIENT_ID AS nvarchar(32)))) = CAST(@clientId AS nvarchar(32))
+    `,
+    (req) => req.input("clientId", sql.Int, clientId),
+  );
+  return rows[0] ?? null;
+}
+
+async function loadInvestorProfile(clientId: number, nin: string) {
+  const [investorRow, detailsRow] = await Promise.all([
+    loadInvestor(clientId, nin),
+    loadInvestorDetails(clientId),
+  ]);
+  return {
+    ...investorRecordFromRow(investorRow),
+    ...investorDetailsFromRow(detailsRow),
+  };
+}
+
 async function loadSecurityMaster(tickers: string[]) {
   const unique = [...new Set(tickers.map((t) => t.trim()).filter(Boolean))];
   const companyNames = new Map<string, string>();
@@ -449,23 +485,26 @@ export async function reconstructClient(clientId: number, asOf: string, shares: 
     ?? cash.find((r) => r.mainObjCode)?.mainObjCode
     ?? null;
   const nin = shares[0]?.nin || cash[0]?.nin || "";
-  const investor = await loadInvestor(clientId, nin);
-  const names = namesFromInvestor(investor);
-  const investorFields = investorRecordFromRow(investor);
+  const profile = await loadInvestorProfile(clientId, nin);
+  const names = { nameEn: profile.nameEn, nameAr: profile.nameAr, iDesc: "" };
   const fallback = fallbackName(clientId, nin);
 
   return {
     clientId,
-    nin,
+    nin: profile.nin || nin,
     mainObjCode,
     accountNumber: String(clientId),
     name: investorDisplayName(names, fallback),
     nameEn: names.nameEn,
     nameAr: names.nameAr,
-    cAccount: investorFields.cAccount,
-    clientType: investorFields.clientType,
-    email: investorFields.email,
-    mobile: investorFields.mobile,
+    cAccount: profile.cAccount,
+    clientType: profile.clientType,
+    email: profile.email,
+    mobile: profile.mobile,
+    poBox: profile.poBox,
+    fax: profile.fax,
+    address: profile.address,
+    city: profile.city,
     asOf,
     cashBalance: cashBal,
     equityMv: Math.round(equityMv * 10000) / 10000,
@@ -585,20 +624,24 @@ export async function getPortfolioStatement(clientId: number, asOf: string, prin
 }
 
 async function statementInvestorHeader(clientId: number, nin: string, cash: ExtCashRow[]) {
-  const investorRow = await loadInvestor(clientId, nin);
-  const rec = investorRecordFromRow(investorRow);
+  const profile = await loadInvestorProfile(clientId, nin);
   const fallback = fallbackName(clientId, nin);
+  const names = { nameEn: profile.nameEn, nameAr: profile.nameAr, iDesc: "" };
   return applySampleInvestorKbHeader(buildInvestorHeader({
     accountId: clientId,
-    nin: rec.nin || nin,
-    nameEn: rec.nameEn,
-    nameAr: rec.nameAr,
-    displayName: investorDisplayName(rec, fallback),
-    clientCode: cash.find((r) => r.mainObjCode)?.mainObjCode ?? rec.mainClientId,
-    cAccount: rec.cAccount,
-    clientType: rec.clientType,
-    email: rec.email,
-    mobile: rec.mobile,
+    nin: profile.nin || nin,
+    nameEn: profile.nameEn,
+    nameAr: profile.nameAr,
+    displayName: investorDisplayName(names, fallback),
+    clientCode: cash.find((r) => r.mainObjCode)?.mainObjCode ?? profile.mainClientId,
+    cAccount: profile.cAccount,
+    clientType: profile.clientType,
+    email: profile.email,
+    mobile: profile.mobile,
+    poBox: profile.poBox,
+    fax: profile.fax,
+    address: profile.address,
+    city: profile.city,
   }));
 }
 
