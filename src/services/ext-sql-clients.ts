@@ -63,8 +63,10 @@ function mapShare(row: Record<string, unknown>): ExtShareRow {
 
 function mapCash(row: Record<string, unknown>): ExtCashRow {
   const main = pick(row, "MainObjCode", "mainObjCode");
-  const invoiceRaw = pick(row, "InvoiceNo", "InvoiceNumber", "invoiceNo", "InvNo", "invNo");
-  const invoiceTypeRaw = pick(row, "InvoiceType", "invoiceType", "InvType", "invType");
+  // Production CashTransactions now has InvNo/InvType (join → ShareTransactions.InvNo).
+  // Older InvoiceNo/InvoiceType names still accepted if present.
+  const invoiceRaw = pick(row, "InvNo", "invNo", "InvoiceNo", "InvoiceNumber", "invoiceNo");
+  const invoiceTypeRaw = pick(row, "InvType", "invType", "InvoiceType", "invoiceType");
   return {
     id: toNum(pick(row, "Id", "id")),
     docCode: String(pick(row, "DocCode", "docCode") ?? ""),
@@ -126,28 +128,42 @@ export async function loadCash(clientId: number, asOf?: string): Promise<ExtCash
       AND (@asOf IS NULL OR CAST(PostDate AS date) <= @asOf)
     ORDER BY PostDate, Id
   `;
-  // Prefer InvoiceNo/InvoiceType when staging columns exist (client 2026-09 voice note).
+  // CashTransactions.InvNo/InvType join ShareTransactions (added on production SQL).
+  // Fall back to InvoiceNo/InvoiceType, then to ledger columns only.
   try {
     const rows = await queryRows(
       `
       SELECT Id, DocCode, DocNo, SerNo, Nin, MainObjCode, ObjCode,
              DbAmt, CrAmt, Remarks, ERemarks, DocDate, PostDate, DocAmt, Status,
-             InvoiceNo, InvoiceType
+             InvNo, InvType
       ${baseWhere}
       `,
       bind,
     );
     return rows.map(mapCash);
   } catch {
-    const rows = await queryRows(
-      `
-      SELECT Id, DocCode, DocNo, SerNo, Nin, MainObjCode, ObjCode,
-             DbAmt, CrAmt, Remarks, ERemarks, DocDate, PostDate, DocAmt, Status
-      ${baseWhere}
-      `,
-      bind,
-    );
-    return rows.map(mapCash);
+    try {
+      const rows = await queryRows(
+        `
+        SELECT Id, DocCode, DocNo, SerNo, Nin, MainObjCode, ObjCode,
+               DbAmt, CrAmt, Remarks, ERemarks, DocDate, PostDate, DocAmt, Status,
+               InvoiceNo, InvoiceType
+        ${baseWhere}
+        `,
+        bind,
+      );
+      return rows.map(mapCash);
+    } catch {
+      const rows = await queryRows(
+        `
+        SELECT Id, DocCode, DocNo, SerNo, Nin, MainObjCode, ObjCode,
+               DbAmt, CrAmt, Remarks, ERemarks, DocDate, PostDate, DocAmt, Status
+        ${baseWhere}
+        `,
+        bind,
+      );
+      return rows.map(mapCash);
+    }
   }
 }
 
@@ -270,6 +286,7 @@ async function stockMasterByTicker(tickers: string[]) {
   return { sectors, stockIds, prices: new Map<string, number>() };
 }
 
+/** Latest official close on or before asOf per ticker (IPMS Postgres stock_prices). */
 export async function loadOfficialCloses(tickers: string[], asOf: string): Promise<Map<string, { price: number; date: string }>> {
   const unique = [...new Set(tickers.map((t) => t.trim()).filter(Boolean))];
   const out = new Map<string, { price: number; date: string }>();
@@ -282,8 +299,10 @@ export async function loadOfficialCloses(tickers: string[], asOf: string): Promi
     date: schema.stockPrices.date,
     price: schema.stockPrices.price,
   }).from(schema.stockPrices)
-    .where(and(inArray(schema.stockPrices.stockId, ids), eq(schema.stockPrices.date, asOf)));
+    .where(and(inArray(schema.stockPrices.stockId, ids), lte(schema.stockPrices.date, asOf)))
+    .orderBy(asc(schema.stockPrices.date));
 
+  // Ascending date → last write wins = latest close ≤ asOf.
   const byStock = new Map<string, { price: number; date: string }>();
   for (const row of rows) {
     const price = toNum(row.price);
@@ -406,25 +425,33 @@ function investorDetailsFromRow(row: Record<string, unknown> | null | undefined)
   };
 }
 
-async function loadInvestorDetails(clientId: number) {
-  const rows = await queryRows(
-    `
-    SELECT TOP 1 CLA_ADDRESS, CLE_ADDRESS, FAX_NUMBER, CL_PO_BOX, CITY_NAME, E_CITY_NAME
-    FROM InvestorsDetails
-    WHERE LTRIM(RTRIM(CAST(CL_CLIENT_ID AS nvarchar(32)))) = CAST(@clientId AS nvarchar(32))
-    `,
-    (req) => req.input("clientId", sql.Int, clientId),
-  );
-  return rows[0] ?? null;
+async function loadInvestorDetails(clientId: number, altClientIds: Array<string | number> = []) {
+  // Compare as nvarchar — CL_MAIN_CLIENT_ID can exceed sql.Int (e.g. 1800101035339).
+  const ids = [...new Set(
+    [String(clientId), ...altClientIds.map((id) => String(id).trim())].filter((id) => id.length > 0),
+  )];
+  for (const id of ids) {
+    const rows = await queryRows(
+      `
+      SELECT TOP 1 CLA_ADDRESS, CLE_ADDRESS, FAX_NUMBER, CL_PO_BOX, CITY_NAME, E_CITY_NAME
+      FROM InvestorsDetails
+      WHERE LTRIM(RTRIM(CAST(CL_CLIENT_ID AS nvarchar(32)))) = @clientId
+      `,
+      (req) => req.input("clientId", sql.NVarChar(32), id),
+    );
+    if (rows[0]) return rows[0];
+  }
+  return null;
 }
 
 async function loadInvestorProfile(clientId: number, nin: string) {
-  const [investorRow, detailsRow] = await Promise.all([
-    loadInvestor(clientId, nin),
-    loadInvestorDetails(clientId),
-  ]);
+  const investorRow = await loadInvestor(clientId, nin);
+  const base = investorRecordFromRow(investorRow);
+  const altIds: Array<string | number> = [];
+  if (base.mainClientId) altIds.push(base.mainClientId);
+  const detailsRow = await loadInvestorDetails(clientId, altIds);
   return {
-    ...investorRecordFromRow(investorRow),
+    ...base,
     ...investorDetailsFromRow(detailsRow),
   };
 }
@@ -900,6 +927,7 @@ export async function getExtCashLedger(
     WITH ledger AS (
       SELECT Id, DocCode, DocNo, SerNo, Nin, MainObjCode, ObjCode,
              DbAmt, CrAmt, Remarks, ERemarks, DocDate, PostDate, DocAmt, Status,
+             InvNo, InvType,
              SUM(ISNULL(CrAmt, 0) - ISNULL(DbAmt, 0)) OVER (ORDER BY PostDate, Id ROWS UNBOUNDED PRECEDING) AS BalanceAfter
       FROM CashTransactions
       WHERE ObjCode = @clientId

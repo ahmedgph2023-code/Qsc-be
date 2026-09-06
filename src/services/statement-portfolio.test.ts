@@ -55,7 +55,7 @@ describe("portfolio statement engine", () => {
     expect(stmt.missingCloses).toEqual([]);
   });
 
-  it("does not treat a prior-day close as the official as-of close", () => {
+  it("uses the latest official close on or before asOf (non-trading days)", () => {
     const stmt = assemblePortfolioStatement({
       asOf: "2024-12-01",
       investor,
@@ -69,6 +69,32 @@ describe("portfolio statement engine", () => {
         avgCost: 2,
       }],
       closes: new Map([["MHAR", { price: 2.5, date: "2024-11-28" }]]),
+      cashLedgerBalance: 0,
+      realizedToAsOf: 0,
+      printedAtIso: "2026-08-26T00:00:00.000Z",
+    });
+    const line = stmt.sectors[0].lines[0];
+    expect(line.priceSource).toBe("official_close");
+    expect(line.closePrice).toBe(2.5);
+    expect(line.closeDate).toBe("2024-11-28");
+    expect(line.marketValue).toBe(2500);
+    expect(stmt.missingCloses).toEqual([]);
+  });
+
+  it("rejects a close dated after the statement asOf", () => {
+    const stmt = assemblePortfolioStatement({
+      asOf: "2024-12-01",
+      investor,
+      lots: [{
+        ticker: "MHAR",
+        companyName: "AL MAHHAR HOLDING COMPANY",
+        sector: "Consumer",
+        compId: 8037,
+        quantity: 1000,
+        totalCost: 2000,
+        avgCost: 2,
+      }],
+      closes: new Map([["MHAR", { price: 2.5, date: "2024-12-02" }]]),
       cashLedgerBalance: 0,
       realizedToAsOf: 0,
       printedAtIso: "2026-08-26T00:00:00.000Z",

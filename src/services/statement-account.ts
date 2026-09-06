@@ -43,17 +43,23 @@ function moneyOrUnknown(value: number | null | undefined, reason: string): State
   return sqlMoney(value);
 }
 
-/** Join cash ↔ share via Invoice Number (+ optional Invoice Type), else DocNo ↔ InvNo. */
+/** Join cash ↔ share via CashTransactions.InvNo (+ InvType), else DocNo ↔ InvNo. */
 export function sharesForCashRow(cash: ExtCashRow, shares: ExtShareRow[]): ExtShareRow[] {
-  const invoiceNo = cash.invoiceNo ?? cash.docNo;
-  if (invoiceNo == null) return [];
-  let matches = shares.filter((s) => s.invNo != null && Number(s.invNo) === Number(invoiceNo));
+  const keys = [...new Set(
+    [cash.invoiceNo, cash.docNo].filter((v): v is number => v != null && Number.isFinite(v)),
+  )];
+  if (!keys.length) return [];
+
   const invType = (cash.invoiceType || "").trim();
-  if (invType && matches.length > 1) {
-    const typed = matches.filter((s) => s.invType.trim().toUpperCase() === invType.toUpperCase());
-    if (typed.length) matches = typed;
+  for (const invoiceNo of keys) {
+    let matches = shares.filter((s) => s.invNo != null && Number(s.invNo) === Number(invoiceNo));
+    if (invType && matches.length > 1) {
+      const typed = matches.filter((s) => s.invType.trim().toUpperCase() === invType.toUpperCase());
+      if (typed.length) matches = typed;
+    }
+    if (matches.length) return matches;
   }
-  return matches;
+  return [];
 }
 
 export function securityFieldsFromShares(shares: ExtShareRow[]): {

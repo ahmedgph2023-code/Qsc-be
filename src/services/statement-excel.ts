@@ -134,12 +134,10 @@ function portfolioRows(stmt: PortfolioStatement): { rows: StyledRow[]; mins: num
       ],
     },
   ];
-  let qty = 0;
   let stripe = false;
   for (const sector of stmt.sectors) {
     rows.push({ kind: "sector", cells: [sector.sectorName] });
     for (const line of sector.lines) {
-      qty += line.quantity;
       rows.push({
         kind: "data",
         stripe,
@@ -164,9 +162,10 @@ function portfolioRows(stmt: PortfolioStatement): { rows: StyledRow[]; mins: num
       stripe = !stripe;
     }
   }
+  // Client 2026-09-07: totals must not include aggregate share quantity.
   rows.push({
     kind: "total",
-    cells: ["TOTAL", "", "", "", "", qty, stmt.grandTotalCost, "", "", "", "", num(stmt.grandTotalMarketValue), "", "", ""],
+    cells: ["TOTAL", "", "", "", "", "", stmt.grandTotalCost, "", "", "", "", num(stmt.grandTotalMarketValue), "", "", ""],
   });
   rows.push(
     ...recapRows([

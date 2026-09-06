@@ -75,8 +75,9 @@ export function lotsFromShares(
   return lots;
 }
 
+/** Use official close on asOf, or the latest official close on/before asOf (non-trading days). */
 function officialCloseOnAsOf(close: OfficialClose | undefined, asOf: string): OfficialClose | undefined {
-  if (!close || close.price <= 0 || close.date !== asOf) return undefined;
+  if (!close || close.price <= 0 || close.date > asOf) return undefined;
   return close;
 }
 
