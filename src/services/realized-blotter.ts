@@ -172,14 +172,21 @@ export function assembleRealizedDetails(input: {
   investor: StatementInvestorHeader;
   shares: ExtShareRow[];
   printedAtIso: string;
+  ticker?: string | null;
+  sectors?: Map<string, string>;
 }): RealizedDetailsStatement {
-  const groups = blotterForPeriod(input.shares, input.from, input.to);
+  let groups = blotterForPeriod(input.shares, input.from, input.to);
+  const tickerFilter = input.ticker?.trim().toUpperCase();
+  if (tickerFilter) {
+    groups = groups.filter((g) => g.ticker.trim().toUpperCase() === tickerFilter);
+  }
   const stocks: RealizedDetailsStock[] = groups.map((g) => {
     const lines = g.opening ? [g.opening, ...g.lines] : g.lines;
     return {
       companyName: g.companyName,
       ticker: g.ticker,
       compId: g.compId,
+      sectorName: input.sectors?.get(g.ticker) ?? null,
       currency: "QAR",
       lines,
       totals: stockTotals(g.opening, g.lines),

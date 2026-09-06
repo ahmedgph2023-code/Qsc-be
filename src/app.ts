@@ -37,6 +37,8 @@ import productDecisionsRoutes from "./routes/product-decisions.js";
 import statementQuestionsRoutes from "./routes/statement-questions.js";
 import uatRoutes from "./routes/uat.js";
 import balanceQuestionsRoutes from "./routes/balance-questions.js";
+import clientReportsRoutes from "./routes/client-reports.js";
+import whatsappRoutes, { webhookRouter } from "./routes/whatsapp.js";
 
 const app = express();
 
@@ -57,6 +59,24 @@ function corsOrigin() {
 }
 
 app.use(cors({ origin: corsOrigin(), credentials: true }));
+
+/** Meta WhatsApp webhook needs raw body for signature verification */
+app.use(
+  "/api/whatsapp/webhook",
+  express.raw({ type: "application/json", limit: "25mb" }),
+  (req, _res, next) => {
+    const buf = req.body as Buffer;
+    (req as express.Request & { rawBody?: Buffer }).rawBody = buf;
+    try {
+      req.body = buf?.length ? JSON.parse(buf.toString("utf8")) : {};
+    } catch {
+      req.body = {};
+    }
+    next();
+  },
+  webhookRouter,
+);
+
 app.use(express.json({ limit: "5mb" }));
 app.use(express.urlencoded({ extended: true }));
 app.use(cookieParser());
@@ -102,6 +122,8 @@ app.use("/api/product-decisions", productDecisionsRoutes);
 app.use("/api/statement-questions", statementQuestionsRoutes);
 app.use("/api/uat", uatRoutes);
 app.use("/api/balance-questions", balanceQuestionsRoutes);
+app.use("/api/client-reports", clientReportsRoutes);
+app.use("/api/whatsapp", whatsappRoutes);
 
 app.get("/api/health", (_req, res) => { res.json({ status: "ok" }); });
 

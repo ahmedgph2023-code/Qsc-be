@@ -139,6 +139,7 @@ describe("portfolio statement engine", () => {
         id: 1, docCode: "TR", docNo: 1, serNo: 1, nin: UAT_SAAD.nin, mainObjCode: UAT_SAAD.clientCode,
         objCode: UAT_SAAD.accountId, dbAmt: 0, crAmt: 50, remarks: null, eRemarks: null,
         docDate: "2024-07-01", postDate: "2024-07-01", docAmt: 50, status: "P",
+        invoiceNo: null, invoiceType: null,
       }],
       investor,
       sectors: new Map([["MHAR", "Consumer"]]),

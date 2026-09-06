@@ -19,6 +19,8 @@ function cash(partial: Partial<ExtCashRow> & Pick<ExtCashRow, "id" | "postDate">
     docDate: partial.postDate,
     docAmt: 0,
     status: "P",
+    invoiceNo: null,
+    invoiceType: null,
     ...partial,
   };
 }
@@ -86,5 +88,81 @@ describe("account statement period cash", () => {
     expect(stmt.closingBalance).toBe(1.79);
     expect(stmt.transactionCount).toBe(0);
     expect(stmt.lines).toHaveLength(1);
+  });
+
+  it("fills qty and avg price from share invoice join", () => {
+    const rows = [
+      cash({ id: 1, postDate: "2025-05-10", crAmt: 100 }),
+      cash({
+        id: 2,
+        postDate: "2025-05-11",
+        dbAmt: 3262,
+        docNo: 99,
+        invoiceNo: 99,
+        invoiceType: "OR",
+        eRemarks: "Buy Securities of DHBK",
+      }),
+    ];
+    const shares = [{
+      id: 1,
+      tickerId: "DHBK",
+      companyName: "Doha Bank",
+      invType: "OR",
+      invDate: "2025-05-11",
+      buySellFlag: "B",
+      nin: UAT_SAAD.nin,
+      clientId: UAT_SAAD.accountId,
+      qty: 1000,
+      avgPrice: 3.262,
+      total: 3262,
+      net: 3262,
+      totalComm: 0,
+      invNo: 99,
+      compId: 1,
+      officeComm: 0,
+      marketComm: 0,
+      originalPrice: 3.262,
+    }];
+    const stmt = assembleAccountStatement({
+      from: "2025-05-11",
+      to: "2025-05-11",
+      investor,
+      cash: rows,
+      shares,
+      layout: "detailed",
+      printedAtIso: "2025-05-11T12:00:00.000Z",
+    });
+    expect(stmt.layout).toBe("detailed");
+    expect(stmt.lines[1].quantity).toBe(1000);
+    expect(stmt.lines[1].securityPrice.value).toBe(3.262);
+  });
+
+  it("groups same description even without share qty (Buy/Sell Securities)", () => {
+    const rows = [
+      cash({ id: 1, postDate: "2025-05-10", crAmt: 10000 }),
+      cash({ id: 2, postDate: "2025-05-11", crAmt: 100, docNo: 1, eRemarks: "Sell Securities of DHBK" }),
+      cash({ id: 3, postDate: "2025-05-12", crAmt: 50, docNo: 9, eRemarks: "Fee" }),
+      cash({ id: 4, postDate: "2025-05-13", crAmt: 200, docNo: 2, eRemarks: "Sell Securities of DHBK" }),
+    ];
+    const detailed = assembleAccountStatement({
+      from: "2025-05-11",
+      to: "2025-05-13",
+      investor,
+      cash: rows,
+      layout: "detailed",
+      printedAtIso: "2025-05-13T12:00:00.000Z",
+    });
+    const grouped = assembleAccountStatement({
+      from: "2025-05-11",
+      to: "2025-05-13",
+      investor,
+      cash: rows,
+      layout: "grouped",
+      printedAtIso: "2025-05-13T12:00:00.000Z",
+    });
+    expect(detailed.transactionCount).toBe(3);
+    expect(grouped.transactionCount).toBe(2);
+    const sell = grouped.lines.find((l) => l.description.includes("Sell Securities of DHBK"));
+    expect(sell?.credit).toBe(300);
   });
 });

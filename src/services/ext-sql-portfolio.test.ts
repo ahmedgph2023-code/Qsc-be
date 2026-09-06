@@ -47,6 +47,8 @@ function cash(partial: Partial<ExtCashRow> & Pick<ExtCashRow, "id" | "postDate">
     docDate: partial.postDate,
     docAmt: 0,
     status: "P",
+    invoiceNo: null,
+    invoiceType: null,
     ...partial,
   };
 }

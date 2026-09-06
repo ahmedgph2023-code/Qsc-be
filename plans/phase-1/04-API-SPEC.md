@@ -252,3 +252,17 @@ Use stable `error` codes matching compliance reason codes where applicable.
 | Illiquidity refresh | when ADTV uploaded | set `is_illiquid` |
 | Daily snapshot compare | 15:15 Asia/Qatar weekdays when `SNAPSHOT_CRON_ENABLED=true` | read SQL `ClientPortfolioSnapshot`; upsert Postgres `ipms_client_snapshots` |
 | Contract expiry reminder | daily | optional stub for F-01 (Phase 2 UI) |
+
+---
+
+## 13. Meta WhatsApp (`/api/whatsapp`)
+
+Admin/pm. All authenticated routes require `?configId=`. Webhook is public (signature + verify token).
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| GET/POST | `/whatsapp/webhook` | Meta verify + ingest (`messages`, `history`, `smb_app_state_sync`, `smb_message_echoes`) |
+| POST | `/whatsapp/sync` | Pull Graph: phone/WABA profile, templates, subscribe WABA. **Does not** GET chat history (Cloud API has none). |
+| POST | `/whatsapp/sync/import-webhooks` | Import official Meta webhook JSON (dedupe by `wamid`). Rejects non-Meta CRM dumps. |
+
+Dedup: `whatsapp_messages.wamid` unique; `whatsapp_conversations (config_id, wa_id)` unique.

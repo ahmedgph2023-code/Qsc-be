@@ -49,12 +49,19 @@ export type PortfolioLot = {
   avgCost: number;
 };
 
-export function lotsFromShares(shares: ExtShareRow[], asOf: string, sectors: Map<string, string>, companyNames: Map<string, string>): PortfolioLot[] {
+export function lotsFromShares(
+  shares: ExtShareRow[],
+  asOf: string,
+  sectors: Map<string, string>,
+  companyNames: Map<string, string>,
+  opts?: { includeZeroQty?: boolean },
+): PortfolioLot[] {
   const events = eventsFromShares(shares, asOf);
   const positions = applyReplayEvents(events);
   const lots: PortfolioLot[] = [];
   for (const [ticker, pos] of positions) {
-    if (pos.quantity <= 0.0001) continue;
+    if (!opts?.includeZeroQty && pos.quantity <= 0.0001) continue;
+    if (opts?.includeZeroQty && pos.quantity < -0.0001) continue;
     lots.push({
       ticker,
       companyName: companyNames.get(ticker) || companyNameFromShare(shares, ticker),
@@ -235,8 +242,15 @@ export function portfolioStatementFromLedgers(input: {
   companyNames: Map<string, string>;
   closes: Map<string, OfficialClose>;
   printedAtIso: string;
+  includeZeroQty?: boolean;
 }): PortfolioStatement {
-  const lots = lotsFromShares(input.shares, input.asOf, input.sectors, input.companyNames);
+  const lots = lotsFromShares(
+    input.shares,
+    input.asOf,
+    input.sectors,
+    input.companyNames,
+    { includeZeroQty: input.includeZeroQty },
+  );
   const realizedToAsOf = realizedFromEvents(eventsFromShares(input.shares, input.asOf));
   return assemblePortfolioStatement({
     asOf: input.asOf,

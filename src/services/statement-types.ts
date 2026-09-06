@@ -165,6 +165,8 @@ export type AccountStatement = {
   company: StatementCompanyHeader;
   investor: StatementInvestorHeader;
   dates: Extract<StatementDateControl, { mode: "range" }>;
+  /** Client 2026-09: grouped (default) vs detailed account statement. */
+  layout: "grouped" | "detailed";
   openingBalance: number;
   openingDate: string | null;
   lines: AccountStatementLine[];
@@ -243,6 +245,7 @@ export type RealizedDetailsStock = {
   companyName: string;
   ticker: string;
   compId: number | null;
+  sectorName?: string | null;
   currency: "QAR";
   lines: RealizedBlotterLine[];
   totals: {

@@ -63,6 +63,8 @@ function mapShare(row: Record<string, unknown>): ExtShareRow {
 
 function mapCash(row: Record<string, unknown>): ExtCashRow {
   const main = pick(row, "MainObjCode", "mainObjCode");
+  const invoiceRaw = pick(row, "InvoiceNo", "InvoiceNumber", "invoiceNo", "InvNo", "invNo");
+  const invoiceTypeRaw = pick(row, "InvoiceType", "invoiceType", "InvType", "invType");
   return {
     id: toNum(pick(row, "Id", "id")),
     docCode: String(pick(row, "DocCode", "docCode") ?? ""),
@@ -79,6 +81,10 @@ function mapCash(row: Record<string, unknown>): ExtCashRow {
     postDate: toYmd(pick(row, "PostDate", "postDate")),
     docAmt: toNum(pick(row, "DocAmt", "docAmt")),
     status: String(pick(row, "Status", "status") ?? ""),
+    invoiceNo: invoiceRaw == null || invoiceRaw === "" ? null : toNum(invoiceRaw),
+    invoiceType: invoiceTypeRaw == null || invoiceTypeRaw === ""
+      ? null
+      : String(invoiceTypeRaw).trim(),
   };
 }
 
@@ -110,21 +116,39 @@ export async function loadShares(clientId: number, asOf?: string): Promise<ExtSh
 }
 
 export async function loadCash(clientId: number, asOf?: string): Promise<ExtCashRow[]> {
-  const rows = await queryRows(
-    `
-    SELECT Id, DocCode, DocNo, SerNo, Nin, MainObjCode, ObjCode,
-           DbAmt, CrAmt, Remarks, ERemarks, DocDate, PostDate, DocAmt, Status
+  const bind = (req: sql.Request) => {
+    req.input("clientId", sql.Int, clientId);
+    req.input("asOf", sql.Date, asOf || null);
+  };
+  const baseWhere = `
     FROM CashTransactions
     WHERE ObjCode = @clientId
       AND (@asOf IS NULL OR CAST(PostDate AS date) <= @asOf)
     ORDER BY PostDate, Id
-    `,
-    (req) => {
-      req.input("clientId", sql.Int, clientId);
-      req.input("asOf", sql.Date, asOf || null);
-    },
-  );
-  return rows.map(mapCash);
+  `;
+  // Prefer InvoiceNo/InvoiceType when staging columns exist (client 2026-09 voice note).
+  try {
+    const rows = await queryRows(
+      `
+      SELECT Id, DocCode, DocNo, SerNo, Nin, MainObjCode, ObjCode,
+             DbAmt, CrAmt, Remarks, ERemarks, DocDate, PostDate, DocAmt, Status,
+             InvoiceNo, InvoiceType
+      ${baseWhere}
+      `,
+      bind,
+    );
+    return rows.map(mapCash);
+  } catch {
+    const rows = await queryRows(
+      `
+      SELECT Id, DocCode, DocNo, SerNo, Nin, MainObjCode, ObjCode,
+             DbAmt, CrAmt, Remarks, ERemarks, DocDate, PostDate, DocAmt, Status
+      ${baseWhere}
+      `,
+      bind,
+    );
+    return rows.map(mapCash);
+  }
 }
 
 export async function getSyncStatus() {
@@ -540,7 +564,8 @@ export async function listExtClients(asOf: string) {
       s.firstShare,
       s.lastShare,
       ISNULL(c.cashBal, 0) AS cashBal,
-      i.NAME_EN, i.CLE_CLIENT_NAME, i.I_DESC
+      i.NAME_EN, i.CLE_CLIENT_NAME, i.I_DESC,
+      i.EMAIL_ADDRESS, i.MOBILE_NO
     FROM (
       SELECT ClientId, MAX(Nin) AS Nin, COUNT(*) AS shareCount,
              MIN(InvDate) AS firstShare, MAX(InvDate) AS lastShare
@@ -587,6 +612,8 @@ export async function listExtClients(asOf: string) {
       firstShare: toYmd(pick(row, "firstShare")) || null,
       lastShare: toYmd(pick(row, "lastShare")) || null,
       cashBalance: Math.round(toNum(pick(row, "cashBal")) * 10000) / 10000,
+      email: emptyToNull(textOrEmpty(pick(row, "EMAIL_ADDRESS", "emailAddress"))),
+      mobile: emptyToNull(textOrEmpty(pick(row, "MOBILE_NO", "mobileNo"))),
       navValue: null as number | null,
       totalInvested: null as number | null,
       returnPct: null as number | null,
@@ -600,7 +627,12 @@ export async function getExtClient(clientId: number, asOf: string) {
   return reconstructClient(clientId, asOf, shares, cash);
 }
 
-export async function getPortfolioStatement(clientId: number, asOf: string, printedAtIso = new Date().toISOString()) {
+export async function getPortfolioStatement(
+  clientId: number,
+  asOf: string,
+  printedAtIso = new Date().toISOString(),
+  opts?: { includeZeroQty?: boolean },
+) {
   const [shares, cash] = await Promise.all([loadShares(clientId, asOf), loadCash(clientId, asOf)]);
   if (shares.length === 0 && cash.length === 0) return null;
   const tickers = [...new Set(shares.map((s) => s.tickerId.trim()).filter(Boolean))];
@@ -620,6 +652,7 @@ export async function getPortfolioStatement(clientId: number, asOf: string, prin
     companyNames: sqlMaster.companyNames,
     closes,
     printedAtIso,
+    includeZeroQty: opts?.includeZeroQty,
   });
 }
 
@@ -645,40 +678,47 @@ async function statementInvestorHeader(clientId: number, nin: string, cash: ExtC
   }));
 }
 
-export async function getAccountStatement(clientId: number, from: string, to: string, printedAtIso = new Date().toISOString()) {
-  const cash = await loadCash(clientId, to);
-  if (cash.length === 0) {
-    const shares = await loadShares(clientId, to);
-    if (shares.length === 0) return null;
-    const nin = shares[0]?.nin || "";
-    return assembleAccountStatement({
-      from,
-      to,
-      investor: await statementInvestorHeader(clientId, nin, cash),
-      cash,
-      printedAtIso,
-    });
-  }
-  const nin = cash[0]?.nin || "";
+export async function getAccountStatement(
+  clientId: number,
+  from: string,
+  to: string,
+  printedAtIso = new Date().toISOString(),
+  layout: "grouped" | "detailed" = "grouped",
+) {
+  const [cash, shares] = await Promise.all([loadCash(clientId, to), loadShares(clientId, to)]);
+  if (cash.length === 0 && shares.length === 0) return null;
+  const nin = cash[0]?.nin || shares[0]?.nin || "";
   return assembleAccountStatement({
     from,
     to,
     investor: await statementInvestorHeader(clientId, nin, cash),
     cash,
+    shares,
+    layout,
     printedAtIso,
   });
 }
 
-export async function getRealizedDetailsStatement(clientId: number, from: string, to: string, printedAtIso = new Date().toISOString()) {
+export async function getRealizedDetailsStatement(
+  clientId: number,
+  from: string,
+  to: string,
+  printedAtIso = new Date().toISOString(),
+  ticker?: string | null,
+) {
   const [shares, cash] = await Promise.all([loadShares(clientId, to), loadCash(clientId, to)]);
   if (shares.length === 0 && cash.length === 0) return null;
   const nin = shares[0]?.nin || cash[0]?.nin || "";
+  const tickers = [...new Set(shares.map((s) => s.tickerId.trim()).filter(Boolean))];
+  const master = await loadSecurityMaster(tickers);
   return assembleRealizedDetails({
     from,
     to,
     investor: await statementInvestorHeader(clientId, nin, cash),
     shares,
     printedAtIso,
+    ticker: ticker?.trim() || null,
+    sectors: master.sqlSectors,
   });
 }
 

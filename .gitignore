@@ -4,6 +4,7 @@ uploads/*
 !uploads/.gitkeep
 .DS_Store
 .tmp-pdf/
+.data/
 .env
 .env.*
 !.env.example

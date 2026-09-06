@@ -6,6 +6,7 @@ import { syncIndexMembershipFlags } from "./services/index-membership.js";
 import { startFeeCron } from "./services/fee-cron.js";
 import { startRiskCron } from "./services/risk-cron.js";
 import { startSnapshotCron } from "./services/snapshot-cron.js";
+import { startClientReportCron } from "./services/client-report-cron.js";
 import { startMarketBroadcast } from "./services/market-broadcast.js";
 
 const PORT = parseInt(process.env.PORT || "5001", 10);
@@ -36,5 +37,6 @@ app.listen(PORT, "0.0.0.0", () => {
   startFeeCron();
   startRiskCron();
   startSnapshotCron();
+  startClientReportCron();
   startMarketBroadcast();
 });

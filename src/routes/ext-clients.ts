@@ -114,7 +114,8 @@ router.get("/:id/statements/portfolio.xlsx", async (req, res) => {
     const clientId = parseClientId(param(req.params.id));
     if (clientId == null) { res.status(400).json({ error: "INVALID_CLIENT_ID" }); return; }
     const asOf = queryAsOf(req.query.asOf) || todayQatar();
-    const stmt = await getPortfolioStatement(clientId, asOf);
+    const includeZeroQty = req.query.includeZeroQty === "1" || req.query.includeZeroQty === "true";
+    const stmt = await getPortfolioStatement(clientId, asOf, new Date().toISOString(), { includeZeroQty });
     if (!stmt) { res.status(404).json({ error: "Not found" }); return; }
     sendWorkbook(res, stmt);
   } catch (err: any) {
@@ -127,7 +128,8 @@ router.get("/:id/statements/portfolio", async (req, res) => {
     const clientId = parseClientId(param(req.params.id));
     if (clientId == null) { res.status(400).json({ error: "INVALID_CLIENT_ID" }); return; }
     const asOf = queryAsOf(req.query.asOf) || todayQatar();
-    const stmt = await getPortfolioStatement(clientId, asOf);
+    const includeZeroQty = req.query.includeZeroQty === "1" || req.query.includeZeroQty === "true";
+    const stmt = await getPortfolioStatement(clientId, asOf, new Date().toISOString(), { includeZeroQty });
     if (!stmt) { res.status(404).json({ error: "Not found" }); return; }
     res.json(stmt);
   } catch (err: any) {
@@ -141,7 +143,8 @@ router.get("/:id/statements/account.xlsx", async (req, res) => {
     if (clientId == null) { res.status(400).json({ error: "INVALID_CLIENT_ID" }); return; }
     const range = requireDateRange(req, res);
     if (!range) return;
-    const stmt = await getAccountStatement(clientId, range.from, range.to);
+    const layout = String(req.query.layout || "grouped").toLowerCase() === "detailed" ? "detailed" : "grouped";
+    const stmt = await getAccountStatement(clientId, range.from, range.to, new Date().toISOString(), layout);
     if (!stmt) { res.status(404).json({ error: "Not found" }); return; }
     sendWorkbook(res, stmt);
   } catch (err: any) {
@@ -155,7 +158,8 @@ router.get("/:id/statements/account", async (req, res) => {
     if (clientId == null) { res.status(400).json({ error: "INVALID_CLIENT_ID" }); return; }
     const range = requireDateRange(req, res);
     if (!range) return;
-    const stmt = await getAccountStatement(clientId, range.from, range.to);
+    const layout = String(req.query.layout || "grouped").toLowerCase() === "detailed" ? "detailed" : "grouped";
+    const stmt = await getAccountStatement(clientId, range.from, range.to, new Date().toISOString(), layout);
     if (!stmt) { res.status(404).json({ error: "Not found" }); return; }
     res.json(stmt);
   } catch (err: any) {
@@ -197,7 +201,8 @@ router.get("/:id/statements/realized-details.xlsx", async (req, res) => {
     if (clientId == null) { res.status(400).json({ error: "INVALID_CLIENT_ID" }); return; }
     const range = requireDateRange(req, res);
     if (!range) return;
-    const stmt = await getRealizedDetailsStatement(clientId, range.from, range.to);
+    const ticker = typeof req.query.ticker === "string" ? req.query.ticker : null;
+    const stmt = await getRealizedDetailsStatement(clientId, range.from, range.to, new Date().toISOString(), ticker);
     if (!stmt) { res.status(404).json({ error: "Not found" }); return; }
     sendWorkbook(res, stmt);
   } catch (err: any) {
@@ -211,7 +216,8 @@ router.get("/:id/statements/realized-details", async (req, res) => {
     if (clientId == null) { res.status(400).json({ error: "INVALID_CLIENT_ID" }); return; }
     const range = requireDateRange(req, res);
     if (!range) return;
-    const stmt = await getRealizedDetailsStatement(clientId, range.from, range.to);
+    const ticker = typeof req.query.ticker === "string" ? req.query.ticker : null;
+    const stmt = await getRealizedDetailsStatement(clientId, range.from, range.to, new Date().toISOString(), ticker);
     if (!stmt) { res.status(404).json({ error: "Not found" }); return; }
     res.json(stmt);
   } catch (err: any) {

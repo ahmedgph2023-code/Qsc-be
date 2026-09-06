@@ -49,6 +49,10 @@ export type ExtCashRow = {
   postDate: string;
   docAmt: number;
   status: string;
+  /** Staging: Invoice Number on CashTransactions (join to ShareTransactions.InvNo). */
+  invoiceNo: number | null;
+  /** Staging: Invoice Type on CashTransactions (join to ShareTransactions.InvType). */
+  invoiceType: string | null;
 };
 
 export type ExtHolding = {
