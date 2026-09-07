@@ -37,10 +37,12 @@ export const ALL_REPORT_SECTIONS: ClientReportSection[] = [
   "performance",
 ];
 
+export type ClientReportFrequency = "daily" | "weekly" | "monthly" | "custom";
+
 export type ClientReportGlobalConfig = {
   schedulingEnabled: boolean;
   dataSections: ClientReportSection[];
-  frequencyType: "daily" | "custom";
+  frequencyType: ClientReportFrequency;
   customDays: number[];
   sendTime: string;
   asOfMode: "latest" | "previous_trading_day";
@@ -70,7 +72,7 @@ export type EffectiveClientReportConfig = {
   sourceEmail?: string | null;
   sourcePhone?: string | null;
   dataSections: ClientReportSection[];
-  frequencyType: "daily" | "custom";
+  frequencyType: ClientReportFrequency;
   customDays: number[];
   sendTime: string;
   asOfMode: "latest" | "previous_trading_day";
@@ -87,7 +89,7 @@ export type ClientReportConfigInput = {
   recipientEmail?: string | null;
   recipientPhone?: string | null;
   dataSections?: ClientReportSection[];
-  frequencyType?: "daily" | "custom";
+  frequencyType?: ClientReportFrequency;
   customDays?: number[];
   sendTime?: string;
   asOfMode?: "latest" | "previous_trading_day";
@@ -150,9 +152,29 @@ function resolveRange(asOf: string, rangeDays: number): { from: string; to: stri
   return { from: addDaysIso(asOf, -(days - 1)), to: asOf };
 }
 
-function shouldSendToday(frequencyType: "daily" | "custom", customDays: number[], iso: string): boolean {
+function dayOfMonth(iso: string): number {
+  return Number(iso.slice(8, 10));
+}
+
+/**
+ * Meeting 3 schedule:
+ * - daily: every calendar day
+ * - weekly: customDays = weekdays (0–6)
+ * - monthly: customDays[0] = day of month (1–28), default 1
+ * - custom: customDays = selected weekdays
+ */
+export function shouldSendToday(
+  frequencyType: ClientReportFrequency,
+  customDays: number[],
+  iso: string,
+): boolean {
   if (frequencyType === "daily") return true;
+  if (frequencyType === "monthly") {
+    const day = customDays[0] && customDays[0] >= 1 && customDays[0] <= 28 ? customDays[0] : 1;
+    return dayOfMonth(iso) === day;
+  }
   const wd = qatarWeekday(iso);
+  if (!customDays.length) return frequencyType === "weekly" ? wd === 1 : false;
   return customDays.includes(wd);
 }
 
@@ -160,7 +182,7 @@ function shouldSendToday(frequencyType: "daily" | "custom", customDays: number[]
 export function computeNextScheduledAt(
   config: {
     enabled: boolean;
-    frequencyType: "daily" | "custom";
+    frequencyType: ClientReportFrequency;
     customDays: number[];
     sendTime: string;
   },
@@ -169,8 +191,9 @@ export function computeNextScheduledAt(
   if (!config.enabled) return null;
   const { hour, minute } = parseSendTime(config.sendTime);
   const startIso = ymdInQatar(after);
+  const horizon = config.frequencyType === "monthly" ? 62 : 21;
 
-  for (let offset = 0; offset < 14; offset++) {
+  for (let offset = 0; offset < horizon; offset++) {
     const iso = addDaysIso(startIso, offset);
     if (!shouldSendToday(config.frequencyType, config.customDays, iso)) continue;
 
@@ -260,11 +283,21 @@ export async function updateGlobalClientReportConfig(
 ) {
   await ensureGlobalClientReportConfig();
   const frequencyType = input.frequencyType ?? "daily";
-  const customDays = frequencyType === "custom"
-    ? (input.customDays ?? DEFAULT_GLOBAL_CLIENT_REPORT.customDays)
-    : [];
-  if (frequencyType === "custom" && customDays.length === 0) {
-    throw Object.assign(new Error("Select at least one day for custom frequency"), { status: 400 });
+  let customDays: number[] = [];
+  if (frequencyType === "daily") {
+    customDays = [];
+  } else if (frequencyType === "monthly") {
+    const day = input.customDays?.[0];
+    customDays = [day && day >= 1 && day <= 28 ? day : 1];
+  } else {
+    customDays = input.customDays?.length
+      ? input.customDays
+      : frequencyType === "weekly"
+        ? [1]
+        : DEFAULT_GLOBAL_CLIENT_REPORT.customDays;
+  }
+  if ((frequencyType === "custom" || frequencyType === "weekly") && customDays.length === 0) {
+    throw Object.assign(new Error("Select at least one day for this frequency"), { status: 400 });
   }
   const dataSections = input.dataSections != null
     ? validateSections(input.dataSections)
@@ -917,7 +950,7 @@ export function formatSectionsSummary(sections: ClientReportSection[]): string {
 }
 
 export function formatFrequencyFrom(config: {
-  frequencyType: "daily" | "custom";
+  frequencyType: ClientReportFrequency;
   customDays: number[];
 }): string {
   if (config.frequencyType === "daily") return "Daily";

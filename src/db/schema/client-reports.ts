@@ -2,7 +2,12 @@ import {
   pgTable, uuid, varchar, text, timestamp, boolean, integer, jsonb, index, pgEnum,
 } from "drizzle-orm/pg-core";
 
-export const clientReportFrequencyEnum = pgEnum("client_report_frequency", ["daily", "custom"]);
+export const clientReportFrequencyEnum = pgEnum("client_report_frequency", [
+  "daily",
+  "weekly",
+  "monthly",
+  "custom",
+]);
 export const clientReportSendStatusEnum = pgEnum("client_report_send_status", [
   "pending", "sent", "failed", "skipped",
 ]);
@@ -21,7 +26,7 @@ export type ClientReportSection =
 export type ClientReportGlobalSettings = {
   schedulingEnabled: boolean;
   dataSections: ClientReportSection[];
-  frequencyType: "daily" | "custom";
+  frequencyType: "daily" | "weekly" | "monthly" | "custom";
   customDays: number[];
   sendTime: string;
   asOfMode: "latest" | "previous_trading_day";

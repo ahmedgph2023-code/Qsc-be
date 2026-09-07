@@ -25,6 +25,7 @@ import { assembleRealizedDetails } from "./realized-blotter.js";
 import { assembleRealizedSummary } from "./realized-summary.js";
 import { applySampleInvestorKbHeader, buildInvestorHeader } from "./statement-types.js";
 import { paginateMeta } from "../utils/params.js";
+import { getLiveLastPriceMap, todayQatarIso } from "./market-broadcast.js";
 
 function pick(row: Record<string, unknown>, ...keys: string[]): unknown {
   for (const key of keys) {
@@ -514,6 +515,13 @@ export async function reconstructClient(clientId: number, asOf: string, shares: 
     master.sectors.set(ticker, sector);
   }
   const prices = await lastCloses(master.stockIds, asOf);
+  // Meeting 3: during the trading day, prefer live Last Price for portfolio MV.
+  if (asOf === todayQatarIso()) {
+    const live = getLiveLastPriceMap();
+    for (const [ticker, px] of live) {
+      if (master.stockIds.has(ticker) && px > 0) prices.set(ticker, px);
+    }
+  }
   const holdings = buildExtHoldings({
     events,
     shares,
@@ -667,6 +675,12 @@ export async function getPortfolioStatement(
     loadSecurityMaster(tickers),
     loadOfficialCloses(tickers, asOf),
   ]);
+  if (asOf === todayQatarIso()) {
+    const live = getLiveLastPriceMap();
+    for (const [ticker, px] of live) {
+      if (px > 0) closes.set(ticker, { price: px, date: asOf });
+    }
+  }
   const nin = shares[0]?.nin || cash[0]?.nin || "";
   const investor = await statementInvestorHeader(clientId, nin, cash);
   return portfolioStatementFromLedgers({
