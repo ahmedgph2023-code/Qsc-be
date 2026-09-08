@@ -50,4 +50,15 @@ describe("market broadcast", () => {
     const status = getBroadcastStatus({});
     expect(status.ingestOfficialCloses).toBe(false);
   });
+
+  it("simulateLiveTicks nudges last prices in memory without claiming DB writes", async () => {
+    const { simulateLiveTicks } = await import("./market-broadcast.js");
+    applyBroadcastPayload(sample);
+    const before = getLiveLastPriceMap().get("MHAR");
+    const { touched } = simulateLiveTicks(5);
+    expect(touched.length).toBeGreaterThan(0);
+    // At least one of the sample symbols may move; map still has values.
+    expect(getLiveLastPriceMap().size).toBeGreaterThanOrEqual(2);
+    expect(before).toBeTypeOf("number");
+  });
 });

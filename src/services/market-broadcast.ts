@@ -39,6 +39,10 @@ export type LiveQuote = {
   netChangePerc: number | null;
   bidPrice: number | null;
   offerPrice: number | null;
+  bidVolume: number | null;
+  offerVolume: number | null;
+  lastTradeVolume: number | null;
+  trades: number | null;
   totalVolume: number | null;
   totalValue: number | null;
   companyName: string | null;
@@ -71,6 +75,8 @@ export type LiveExchangeSummary = {
   symbolsUp: number | null;
   symbolsDown: number | null;
   symbolsUnchanged: number | null;
+  symbolsTraded: number | null;
+  totalExecuted: number | null;
   lastUpdateTime: string | null;
 };
 
@@ -89,6 +95,15 @@ type BroadcastStatus = {
   hubUrl: string | null;
   sessionHoursQatar: string;
   exchange: LiveExchangeSummary | null;
+  /** Asia/Qatar clock when Last Price is saved as official close. */
+  closeSaveHour: number;
+  closeSaveMinute: number;
+  closeSaveLabel: string;
+};
+
+export type LiveCloseSaveConfig = {
+  hour: number;
+  minute: number;
 };
 
 const quotes = new Map<string, LiveQuote>();
@@ -98,12 +113,52 @@ let lastMessageAt: string | null = null;
 let connected = false;
 let sampleLoaded = false;
 let ws: WebSocket | null = null;
-let closeCronStarted = false;
+let closeCronTask: ReturnType<typeof cron.schedule> | null = null;
+let closeSaveConfig: LiveCloseSaveConfig = { hour: 15, minute: 5 };
 
 function toNum(v: unknown): number | null {
   if (v == null || v === "") return null;
   const n = typeof v === "number" ? v : Number(String(v).replace(/,/g, ""));
   return Number.isFinite(n) ? n : null;
+}
+
+/** OHLC often arrives as 0 before the session prints a real open — treat as missing. */
+function toSessionPrice(v: unknown): number | null {
+  const n = toNum(v);
+  if (n == null || n <= 0) return null;
+  return n;
+}
+
+function asText(v: unknown): string | null {
+  if (v == null) return null;
+  const s = String(v).trim();
+  if (!s || s.includes("\uFFFD")) return null;
+  return s;
+}
+
+function pickCompanyNameEn(row: Record<string, unknown>): string | null {
+  return (
+    asText(row.companyE) ??
+    asText(row.symbolNameE) ??
+    asText(row.symbolNameEnglish) ??
+    null
+  );
+}
+
+function pickCompanyNameAr(row: Record<string, unknown>): string | null {
+  return (
+    asText(row.companyA) ??
+    asText(row.symbolNameArabic) ??
+    asText(row.symbolNameA) ??
+    null
+  );
+}
+
+/** Meeting sample was saved as Windows-1256 bytes inside a JSON shell — recover UTF-8. */
+export function parseBroadcastJsonText(buf: Buffer): unknown {
+  const asUtf8 = buf.toString("utf8");
+  if (!asUtf8.includes("\uFFFD")) return JSON.parse(asUtf8);
+  return JSON.parse(new TextDecoder("windows-1256").decode(buf));
 }
 
 function todayQatarIso(d = new Date()): string {
@@ -172,7 +227,7 @@ export function parseBroadcastPayload(payload: unknown): {
       outExchange = {
         exchangeId: String(row.exchangeID ?? row.exchangeId ?? "QE"),
         nameEn: String(row.exchangeNameE ?? row.e_M_NAME ?? "Qatar Exchange"),
-        nameAr: row.exchangeNameA != null ? String(row.exchangeNameA) : null,
+        nameAr: asText(row.exchangeNameA) ?? asText(row.m_NAME),
         currentValue: toNum(row.currentValue),
         netChange: toNum(row.netChange),
         netChangePerc: toNum(row.netChangePerc),
@@ -181,6 +236,8 @@ export function parseBroadcastPayload(payload: unknown): {
         symbolsUp: toNum(row.symbolsUP),
         symbolsDown: toNum(row.symbolsDown),
         symbolsUnchanged: toNum(row.symbolsUnChange),
+        symbolsTraded: toNum(row.symbolsTraded),
+        totalExecuted: toNum(row.totalExecuted),
         lastUpdateTime: row.lastUpdateTime != null ? String(row.lastUpdateTime) : null,
       };
     }
@@ -199,18 +256,22 @@ export function parseBroadcastPayload(payload: unknown): {
           symbol,
           lastTradePrice: last,
           closePrice: toNum(row.closePrice),
-          openPrice: toNum(row.openPrice),
-          highPrice: toNum(row.highPrice),
-          lowPrice: toNum(row.lowPrice),
+          openPrice: toSessionPrice(row.openPrice),
+          highPrice: toSessionPrice(row.highPrice),
+          lowPrice: toSessionPrice(row.lowPrice),
           netChange: toNum(row.netChange),
           netChangePerc: toNum(row.netChangePerc),
-          bidPrice: toNum(row.bidPrice),
-          offerPrice: toNum(row.offerPrice),
+          bidPrice: toSessionPrice(row.bidPrice) ?? toNum(row.bidPrice),
+          offerPrice: toSessionPrice(row.offerPrice) ?? toNum(row.offerPrice),
+          bidVolume: toNum(row.bidVolume) ?? toNum(row.totalBidVolume),
+          offerVolume: toNum(row.offerVolume) ?? toNum(row.totalOfferVolume),
+          lastTradeVolume: toNum(row.lastTradeVolume),
+          trades: toNum(row.executed) ?? toNum(row.totalBidExecutions),
           totalVolume: toNum(row.totalVolume),
           totalValue: toNum(row.totalValue),
-          companyName: row.companyE != null ? String(row.companyE) : row.symbolNameE != null ? String(row.symbolNameE) : null,
-          companyNameAr: row.companyA != null ? String(row.companyA) : row.symbolNameA != null ? String(row.symbolNameA) : null,
-          sector: row.sectorE != null ? String(row.sectorE) : row.sectorA != null ? String(row.sectorA) : null,
+          companyName: pickCompanyNameEn(row),
+          companyNameAr: pickCompanyNameAr(row),
+          sector: asText(row.sectorE) ?? asText(row.sectorA),
           updatedAt: String(row.updateDateTime ?? now),
         });
       }
@@ -224,12 +285,12 @@ export function parseBroadcastPayload(payload: unknown): {
         outIndices.push({
           code,
           nameEn: String(row.ciE_DESC ?? row.exchangeNameE ?? code),
-          nameAr: row.ciA_DESC != null ? String(row.ciA_DESC) : null,
+          nameAr: asText(row.ciA_DESC),
           current,
           change: toNum(row.cI_CHG_INDEX),
           changePerc: toNum(row.cI_CHG_PERC_INDEX),
-          high: toNum(row.cI_HIGH_INDEX),
-          low: toNum(row.cI_LOW_INDEX),
+          high: toSessionPrice(row.cI_HIGH_INDEX),
+          low: toSessionPrice(row.cI_LOW_INDEX),
           updatedAt: now,
         });
       }
@@ -273,6 +334,7 @@ export function getBroadcastStatus(env: NodeJS.ProcessEnv = process.env): Broadc
   const configured = isBroadcastUrlConfigured(env);
   const hasQuotes = quotes.size > 0;
   const session = isBroadcastSessionOpen();
+  const close = getCloseSaveConfig();
   return {
     configured,
     connected: connected || sampleLoaded,
@@ -288,17 +350,78 @@ export function getBroadcastStatus(env: NodeJS.ProcessEnv = process.env): Broadc
     hubUrl: (env.BROADCAST_WS_URL || "").trim() || null,
     sessionHoursQatar: "08:00–15:00 Asia/Qatar",
     exchange: exchangeSummary,
+    closeSaveHour: close.hour,
+    closeSaveMinute: close.minute,
+    closeSaveLabel: `${String(close.hour).padStart(2, "0")}:${String(close.minute).padStart(2, "0")} Asia/Qatar`,
   };
 }
 
 export function loadBroadcastSample(env: NodeJS.ProcessEnv = process.env): boolean {
   const file = samplePath(env);
   if (!file) return false;
-  const raw = JSON.parse(fs.readFileSync(file, "utf8"));
+  const raw = parseBroadcastJsonText(fs.readFileSync(file));
   applyBroadcastPayload(raw);
   sampleLoaded = true;
   console.log(`[live] Loaded broadcast sample (${quotes.size} quotes, ${indices.size} indices) from ${file}`);
   return true;
+}
+
+function closeConfigPath(): string {
+  const here = path.dirname(fileURLToPath(import.meta.url));
+  return path.resolve(here, "../../../.data/live-close-config.json");
+}
+
+function clampHour(n: number): number {
+  if (!Number.isFinite(n)) return 15;
+  return Math.min(23, Math.max(0, Math.trunc(n)));
+}
+
+function clampMinute(n: number): number {
+  if (!Number.isFinite(n)) return 5;
+  return Math.min(59, Math.max(0, Math.trunc(n)));
+}
+
+function readCloseConfigFromDisk(): LiveCloseSaveConfig | null {
+  try {
+    const file = closeConfigPath();
+    if (!fs.existsSync(file)) return null;
+    const raw = JSON.parse(fs.readFileSync(file, "utf8")) as Partial<LiveCloseSaveConfig>;
+    return { hour: clampHour(Number(raw.hour)), minute: clampMinute(Number(raw.minute)) };
+  } catch {
+    return null;
+  }
+}
+
+function envCloseConfig(env: NodeJS.ProcessEnv = process.env): LiveCloseSaveConfig {
+  const hhmm = (env.BROADCAST_CLOSE_HHMM || "").trim();
+  if (/^\d{1,2}:\d{2}$/.test(hhmm)) {
+    const [h, m] = hhmm.split(":").map(Number);
+    return { hour: clampHour(h!), minute: clampMinute(m!) };
+  }
+  return {
+    hour: clampHour(Number(env.BROADCAST_CLOSE_HOUR ?? 15)),
+    minute: clampMinute(Number(env.BROADCAST_CLOSE_MINUTE ?? 5)),
+  };
+}
+
+export function getCloseSaveConfig(): LiveCloseSaveConfig {
+  return { ...closeSaveConfig };
+}
+
+export function setCloseSaveConfig(input: { hour: number; minute?: number }): LiveCloseSaveConfig {
+  closeSaveConfig = {
+    hour: clampHour(input.hour),
+    minute: clampMinute(input.minute ?? closeSaveConfig.minute),
+  };
+  try {
+    const file = closeConfigPath();
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, JSON.stringify(closeSaveConfig, null, 2), "utf8");
+  } catch (err) {
+    console.warn("[live] could not persist close-save config", err instanceof Error ? err.message : err);
+  }
+  startCloseCron();
+  return getCloseSaveConfig();
 }
 
 async function upsertClosePrices(asOf: string, priceByTicker: Map<string, number>): Promise<number> {
@@ -350,6 +473,37 @@ export async function persistSessionCloses(asOf = todayQatarIso()): Promise<{ as
   return { asOf, written };
 }
 
+/**
+ * QA helper: nudge a few Last Prices so the UI can prove live flash updates
+ * without the real Hub URL. Does not write stock_prices.
+ */
+export function simulateLiveTicks(count = 8): { touched: string[] } {
+  const list = [...quotes.values()];
+  if (list.length === 0) return { touched: [] };
+  const n = Math.max(1, Math.min(count, list.length));
+  const touched: string[] = [];
+  for (let i = 0; i < n; i++) {
+    const idx = Math.floor(Math.random() * list.length);
+    const q = list[idx]!;
+    const delta = (Math.random() > 0.5 ? 1 : -1) * (0.001 + Math.random() * 0.02);
+    const next = Math.max(0.001, Math.round((q.lastTradePrice + delta) * 1000) / 1000);
+    const close = q.closePrice ?? q.lastTradePrice;
+    const netChange = Math.round((next - close) * 1000) / 1000;
+    const netChangePerc = close > 0 ? Math.round((netChange / close) * 10000) / 100 : null;
+    quotes.set(q.symbol, {
+      ...q,
+      lastTradePrice: next,
+      netChange,
+      netChangePerc,
+      updatedAt: new Date().toISOString(),
+    });
+    touched.push(q.symbol);
+  }
+  lastMessageAt = new Date().toISOString();
+  sampleLoaded = true;
+  return { touched: [...new Set(touched)] };
+}
+
 function connectWebSocket(url: string): void {
   try {
     ws?.close();
@@ -390,17 +544,22 @@ function connectWebSocket(url: string): void {
 }
 
 function startCloseCron(): void {
-  if (closeCronStarted) return;
-  closeCronStarted = true;
-  // 15:05 Asia/Qatar — after meeting service window ends at 15:00
-  cron.schedule("5 15 * * 0-4", () => {
+  try {
+    closeCronTask?.stop();
+  } catch {
+    /* ignore */
+  }
+  const { hour, minute } = closeSaveConfig;
+  closeCronTask = cron.schedule(`${minute} ${hour} * * 0-4`, () => {
     void persistSessionCloses().catch((err) => {
       console.error("[live] persistSessionCloses failed", err);
     });
   }, { timezone: "Asia/Qatar" });
+  console.log(`[live] Close-save cron set for ${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")} Asia/Qatar (Sun–Thu)`);
 }
 
 export function startMarketBroadcast(): void {
+  closeSaveConfig = readCloseConfigFromDisk() ?? envCloseConfig();
   startCloseCron();
   const url = (process.env.BROADCAST_WS_URL || "").trim();
   const wantSample = process.env.BROADCAST_LOAD_SAMPLE !== "0";
@@ -413,7 +572,6 @@ export function startMarketBroadcast(): void {
     } else {
       console.log("[live] Hub URL set; waiting for Qatar session 08:00–15:00 to connect");
     }
-    // Re-check session open every minute
     setInterval(() => {
       if (!url) return;
       if (isBroadcastSessionOpen() && !connected) connectWebSocket(url);
@@ -424,11 +582,20 @@ export function startMarketBroadcast(): void {
       }
     }, 60_000);
   } else {
-    console.log("[live] No BROADCAST_WS_URL — using sample/in-memory quotes only; ticks never write stock_prices until session-end job");
+    console.log("[live] No BROADCAST_WS_URL — using sample/in-memory quotes only; ticks never write stock_prices until end-of-day close job");
+    // Demo: nudge in-memory Last Prices so /live 30s poll shows flash + fresh lastMessageAt (no DB writes).
+    if (process.env.BROADCAST_SAMPLE_AUTO_TICK !== "0") {
+      setInterval(() => {
+        if (quotes.size === 0) return;
+        if (ws && connected) return;
+        simulateLiveTicks(8);
+      }, 30_000);
+      console.log("[live] Sample auto-tick every 30s (set BROADCAST_SAMPLE_AUTO_TICK=0 to disable)");
+    }
   }
 
   const status = getBroadcastStatus();
-  console.log(`[live] status connected=${status.connected} quotes=${status.quoteCount} valuation=${status.valuationSource}`);
+  console.log(`[live] status connected=${status.connected} quotes=${status.quoteCount} valuation=${status.valuationSource} closeSave=${status.closeSaveLabel}`);
 }
 
 export { todayQatarIso };
