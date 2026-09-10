@@ -9,6 +9,7 @@ import {
   getLiveQuotes,
   loadBroadcastSample,
   persistSessionCloses,
+  refreshFromQsePublicWebsite,
   setCloseSaveConfig,
   simulateLiveTicks,
 } from "../services/market-broadcast.js";
@@ -45,6 +46,20 @@ router.post("/load-sample", requireRole("admin", "pm"), (_req, res) => {
     return;
   }
   res.json({ ok: true, status: getBroadcastStatus() });
+});
+
+/** Pull Market Watch snapshot from qe.com.qa public mw.php (QA fallback when Hub missing). */
+router.post("/refresh-qse", requireRole("admin", "pm"), async (_req, res) => {
+  const result = await refreshFromQsePublicWebsite();
+  if (!result.ok) {
+    res.status(502).json({
+      error: "QSE_PUBLIC_UNAVAILABLE",
+      message: result.error ?? "Could not reach QSE Market Watch",
+      status: getBroadcastStatus(),
+    });
+    return;
+  }
+  res.json({ ok: true, quoteCount: result.quoteCount, status: getBroadcastStatus() });
 });
 
 /** Nudge Last Prices in memory for UI flash QA (no DB write). */

@@ -80,10 +80,13 @@ export type LiveExchangeSummary = {
   lastUpdateTime: string | null;
 };
 
+type FeedSource = "hub" | "qse_public" | "sample" | "none";
+
 type BroadcastStatus = {
   configured: boolean;
   connected: boolean;
   sampleLoaded: boolean;
+  feedSource: FeedSource;
   quoteCount: number;
   indexCount: number;
   lastMessageAt: string | null;
@@ -112,9 +115,16 @@ let exchangeSummary: LiveExchangeSummary | null = null;
 let lastMessageAt: string | null = null;
 let connected = false;
 let sampleLoaded = false;
+let feedSource: FeedSource = "none";
 let ws: WebSocket | null = null;
 let closeCronTask: ReturnType<typeof cron.schedule> | null = null;
 let closeSaveConfig: LiveCloseSaveConfig = { hour: 15, minute: 5 };
+let qsePollTimer: ReturnType<typeof setInterval> | null = null;
+
+const QSE_MW_URLS = [
+  "https://www.qe.com.qa/wp/mw/bg/mw.php",
+  "https://www.qe.com.qa/wp/mw_app/mw.php",
+] as const;
 
 function toNum(v: unknown): number | null {
   if (v == null || v === "") return null;
@@ -147,11 +157,19 @@ function pickCompanyNameEn(row: Record<string, unknown>): string | null {
 
 function pickCompanyNameAr(row: Record<string, unknown>): string | null {
   return (
-    asText(row.companyA) ??
     asText(row.symbolNameArabic) ??
+    asText(row.companyA) ??
     asText(row.symbolNameA) ??
     null
   );
+}
+
+/** Client: Symbol With Icon (Object 2) — e.g. DHBK. */
+function pickSymbol(row: Record<string, unknown>): string {
+  const raw = String(row.symbolWithIcon ?? row.SymbolWithIcon ?? row.symbol ?? row.Symbol ?? "").trim();
+  if (!raw) return "";
+  const m = raw.match(/[A-Za-z]{2,12}/);
+  return (m?.[0] ?? raw).toUpperCase();
 }
 
 /** Meeting sample was saved as Windows-1256 bytes inside a JSON shell — recover UTF-8. */
@@ -244,7 +262,7 @@ export function parseBroadcastPayload(payload: unknown): {
 
     if (/marketwatch/i.test(name) && Array.isArray(value)) {
       for (const row of value as Record<string, unknown>[]) {
-        const symbol = String(row.symbol ?? row.Symbol ?? "").trim().toUpperCase();
+        const symbol = pickSymbol(row);
         if (!symbol) continue;
         const last =
           toNum(row.lastTradePrice) ??
@@ -252,21 +270,32 @@ export function parseBroadcastPayload(payload: unknown): {
           toNum(row.LastPrice) ??
           toNum(row.closePrice);
         if (last == null || last <= 0) continue;
+        const closePrice = toNum(row.closePrice);
+        const netChange =
+          toNum(row.netChange) ??
+          toNum(row.change) ??
+          (closePrice != null ? Math.round((last - closePrice) * 10000) / 10000 : null);
+        const netChangePerc =
+          toNum(row.netChangePerc) ??
+          toNum(row.changePerc) ??
+          (closePrice != null && closePrice > 0 && netChange != null
+            ? Math.round((netChange / closePrice) * 10000) / 100
+            : null);
         outQuotes.push({
           symbol,
           lastTradePrice: last,
-          closePrice: toNum(row.closePrice),
+          closePrice,
           openPrice: toSessionPrice(row.openPrice),
           highPrice: toSessionPrice(row.highPrice),
           lowPrice: toSessionPrice(row.lowPrice),
-          netChange: toNum(row.netChange),
-          netChangePerc: toNum(row.netChangePerc),
-          bidPrice: toSessionPrice(row.bidPrice) ?? toNum(row.bidPrice),
-          offerPrice: toSessionPrice(row.offerPrice) ?? toNum(row.offerPrice),
+          netChange,
+          netChangePerc,
+          bidPrice: toNum(row.bidPrice),
+          offerPrice: toNum(row.offerPrice),
           bidVolume: toNum(row.bidVolume) ?? toNum(row.totalBidVolume),
           offerVolume: toNum(row.offerVolume) ?? toNum(row.totalOfferVolume),
           lastTradeVolume: toNum(row.lastTradeVolume),
-          trades: toNum(row.executed) ?? toNum(row.totalBidExecutions),
+          trades: toNum(row.executed),
           totalVolume: toNum(row.totalVolume),
           totalValue: toNum(row.totalValue),
           companyName: pickCompanyNameEn(row),
@@ -306,7 +335,232 @@ export function applyBroadcastPayload(payload: unknown): { quoteCount: number; i
   for (const ix of parsed.indices) indices.set(ix.code, ix);
   if (parsed.exchange) exchangeSummary = parsed.exchange;
   lastMessageAt = new Date().toISOString();
+  if (feedSource === "none") feedSource = "hub";
   return { quoteCount: parsed.quotes.length, indexCount: parsed.indices.length };
+}
+
+/** Map public QSE Market Watch row (mw.php) → LiveQuote. */
+export function mapQsePublicWatchRow(row: Record<string, unknown>, now = new Date().toISOString()): LiveQuote | null {
+  const symbol = pickSymbol({
+    symbolWithIcon: row.Symbol ?? row.symbol,
+    symbol: row.Symbol ?? row.symbol,
+  });
+  if (!symbol) return null;
+  const last =
+    toNum(row.LastPrice) ??
+    toNum(row.lastTradePrice) ??
+    toNum(row.lastPrice);
+  if (last == null || last <= 0) return null;
+  const closePrice =
+    toNum(row.PrevClosing) ??
+    toNum(row.prevClosing) ??
+    toNum(row.closePrice);
+  const netChange =
+    toNum(row.Change) ??
+    toNum(row.netChange) ??
+    (closePrice != null ? Math.round((last - closePrice) * 10000) / 10000 : null);
+  const netChangePerc =
+    toNum(row.PercentChange) ??
+    toNum(row.netChangePerc) ??
+    (closePrice != null && closePrice > 0 && netChange != null
+      ? Math.round((netChange / closePrice) * 10000) / 100
+      : null);
+  return {
+    symbol,
+    lastTradePrice: last,
+    closePrice,
+    openPrice: toSessionPrice(row.OpenPrice ?? row.openPrice),
+    highPrice: toSessionPrice(row.High ?? row.highPrice),
+    lowPrice: toSessionPrice(row.Low ?? row.lowPrice),
+    netChange,
+    netChangePerc,
+    bidPrice: toNum(row.BidPrice ?? row.bidPrice),
+    offerPrice: toNum(row.OfferPrice ?? row.offerPrice),
+    bidVolume: toNum(row.BidVolume ?? row.bidVolume),
+    offerVolume: toNum(row.OfferVolume ?? row.offerVolume),
+    lastTradeVolume: toNum(row.lastTradeVolume),
+    trades: toNum(row.Trades ?? row.executed),
+    totalVolume: toNum(row.Volume ?? row.totalVolume),
+    totalValue: toNum(row.Value ?? row.totalValue),
+    companyName: asText(row.CompanyEN) ?? pickCompanyNameEn(row),
+    companyNameAr: asText(row.CompanyAR) ?? pickCompanyNameAr(row),
+    sector: asText(row.SectorEN) ?? asText(row.SectorAR) ?? asText(row.sectorE),
+    updatedAt: now,
+  };
+}
+
+function exchangeFromQuotes(list: LiveQuote[]): LiveExchangeSummary {
+  let up = 0;
+  let down = 0;
+  let flat = 0;
+  let volume = 0;
+  let turnOver = 0;
+  let totalExecuted = 0;
+  let traded = 0;
+  for (const q of list) {
+    const dir =
+      q.closePrice != null && Number.isFinite(q.closePrice)
+        ? q.lastTradePrice - q.closePrice
+        : q.netChange ?? 0;
+    if (Math.abs(dir) < 1e-9) flat += 1;
+    else if (dir > 0) up += 1;
+    else down += 1;
+    if ((q.totalVolume ?? 0) > 0 || (q.trades ?? 0) > 0) traded += 1;
+    volume += q.totalVolume ?? 0;
+    turnOver += q.totalValue ?? 0;
+    totalExecuted += q.trades ?? 0;
+  }
+  return {
+    exchangeId: "QE",
+    nameEn: "Qatar Stock Exchange",
+    nameAr: "سوق قطر",
+    currentValue: null,
+    netChange: null,
+    netChangePerc: null,
+    volume,
+    turnOver,
+    symbolsUp: up,
+    symbolsDown: down,
+    symbolsUnchanged: flat,
+    symbolsTraded: traded,
+    totalExecuted,
+    lastUpdateTime: new Date().toISOString(),
+  };
+}
+
+function applyQsePublicWatch(rows: Record<string, unknown>[]): number {
+  const now = new Date().toISOString();
+  const mapped: LiveQuote[] = [];
+  for (const row of rows) {
+    const q = mapQsePublicWatchRow(row, now);
+    if (!q) continue;
+    quotes.set(q.symbol, q);
+    mapped.push(q);
+  }
+  if (mapped.length === 0) return 0;
+  exchangeSummary = {
+    ...exchangeFromQuotes(mapped),
+    currentValue: exchangeSummary?.currentValue ?? null,
+    netChange: exchangeSummary?.netChange ?? null,
+    netChangePerc: exchangeSummary?.netChangePerc ?? null,
+  };
+  lastMessageAt = now;
+  sampleLoaded = false;
+  feedSource = "qse_public";
+  connected = true;
+  return mapped.length;
+}
+
+async function postQseMw(url: string, form: string, timeoutMs = 25_000): Promise<unknown> {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: {
+        "content-type": "application/x-www-form-urlencoded",
+        "user-agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        accept: "application/json,text/plain,*/*",
+        origin: "https://www.qe.com.qa",
+        referer: "https://www.qe.com.qa/wp/mws/market/main",
+      },
+      body: form,
+      signal: ctrl.signal,
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return await res.json();
+  } catch (err) {
+    if (process.platform === "win32") {
+      return postQseMwViaPowershell(url, form, timeoutMs);
+    }
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** Some Windows/Node TLS stacks reset on qe.com.qa; PowerShell often succeeds. */
+async function postQseMwViaPowershell(url: string, form: string, timeoutMs: number): Promise<unknown> {
+  const { execFile } = await import("node:child_process");
+  const { promisify } = await import("node:util");
+  const execFileAsync = promisify(execFile);
+  const ps = `
+$ErrorActionPreference = 'Stop'
+$r = Invoke-WebRequest -Uri '${url.replace(/'/g, "''")}' -Method POST -Body '${form.replace(/'/g, "''")}' -ContentType 'application/x-www-form-urlencoded' -Headers @{ 'User-Agent'='Mozilla/5.0'; Referer='https://www.qe.com.qa/wp/mws/market/main'; Origin='https://www.qe.com.qa' } -UseBasicParsing -TimeoutSec ${Math.max(5, Math.ceil(timeoutMs / 1000))}
+$r.Content
+`.trim();
+  const { stdout } = await execFileAsync(
+    "powershell.exe",
+    ["-NoProfile", "-NonInteractive", "-Command", ps],
+    { timeout: timeoutMs + 5_000, windowsHide: true, maxBuffer: 20 * 1024 * 1024 },
+  );
+  return JSON.parse(String(stdout));
+}
+
+/** Public QSE Market Watch snapshot used by qe.com.qa (fallback when Hub URL is missing). */
+export async function refreshFromQsePublicWebsite(): Promise<{ ok: boolean; quoteCount: number; error?: string }> {
+  if (process.env.BROADCAST_QSE_PUBLIC === "0") {
+    return { ok: false, quoteCount: 0, error: "DISABLED" };
+  }
+  let lastErr = "NO_ENDPOINT";
+  for (const url of QSE_MW_URLS) {
+    try {
+      const json = (await postQseMw(url, "f=MarketWatch")) as Record<string, unknown>;
+      const rows = Array.isArray(json.rows) ? (json.rows as Record<string, unknown>[]) : [];
+      const n = applyQsePublicWatch(rows);
+      if (n <= 0) {
+        lastErr = "EMPTY_ROWS";
+        continue;
+      }
+      // Best-effort indices / index level (ignore failures).
+      try {
+        const ixJson = (await postQseMw(url, "f=Indices")) as Record<string, unknown>;
+        const ixRows = Array.isArray(ixJson.rows) ? (ixJson.rows as Record<string, unknown>[]) : [];
+        const now = new Date().toISOString();
+        for (const row of ixRows) {
+          const code = String(row.IndexCode ?? row.Code ?? row.code ?? "").trim() || "IDX";
+          const current = toNum(row.Value ?? row.Current ?? row.currentValue ?? row.Last);
+          if (current == null) continue;
+          indices.set(code, {
+            code,
+            nameEn: String(row.NameEN ?? row.IndexNameEN ?? row.nameEn ?? code),
+            nameAr: asText(row.NameAR ?? row.IndexNameAR),
+            current,
+            change: toNum(row.Change ?? row.netChange),
+            changePerc: toNum(row.PercentChange ?? row.netChangePerc),
+            high: toSessionPrice(row.High),
+            low: toSessionPrice(row.Low),
+            updatedAt: now,
+          });
+        }
+      } catch {
+        /* optional */
+      }
+      try {
+        const idx = (await postQseMw(url, "f=Index")) as Record<string, unknown>;
+        const row = (Array.isArray(idx.rows) ? idx.rows[0] : idx) as Record<string, unknown> | undefined;
+        if (row && exchangeSummary) {
+          exchangeSummary = {
+            ...exchangeSummary,
+            currentValue: toNum(row.Value ?? row.Current ?? row.currentValue) ?? exchangeSummary.currentValue,
+            netChange: toNum(row.Change ?? row.netChange) ?? exchangeSummary.netChange,
+            netChangePerc: toNum(row.PercentChange ?? row.netChangePerc) ?? exchangeSummary.netChangePerc,
+            nameEn: asText(row.NameEN ?? row.nameEn) ?? exchangeSummary.nameEn,
+            nameAr: asText(row.NameAR) ?? exchangeSummary.nameAr,
+          };
+        }
+      } catch {
+        /* optional */
+      }
+      console.log(`[live] QSE public Market Watch ok via ${url} (${n} quotes)`);
+      return { ok: true, quoteCount: n };
+    } catch (err) {
+      lastErr = err instanceof Error ? err.message : String(err);
+      console.warn(`[live] QSE public fetch failed ${url}: ${lastErr}`);
+    }
+  }
+  return { ok: false, quoteCount: 0, error: lastErr };
 }
 
 export function getLiveQuotes(): LiveQuote[] {
@@ -335,10 +589,12 @@ export function getBroadcastStatus(env: NodeJS.ProcessEnv = process.env): Broadc
   const hasQuotes = quotes.size > 0;
   const session = isBroadcastSessionOpen();
   const close = getCloseSaveConfig();
+  const liveFeed = feedSource === "hub" || feedSource === "qse_public";
   return {
     configured,
-    connected: connected || sampleLoaded,
+    connected: liveFeed && (connected || hasQuotes),
     sampleLoaded,
+    feedSource,
     quoteCount: quotes.size,
     indexCount: indices.size,
     lastMessageAt,
@@ -346,7 +602,7 @@ export function getBroadcastStatus(env: NodeJS.ProcessEnv = process.env): Broadc
     ingestOfficialCloses: false,
     valuationSource: session && hasQuotes ? "last_price_session" : "official_close",
     objectsNamedByQsc: [...BROADCAST_OBJECT_NAMES],
-    blockedReason: configured || sampleLoaded || hasQuotes ? null : "NO_BROADCAST_WS_URL",
+    blockedReason: configured || hasQuotes ? null : "NO_BROADCAST_WS_URL",
     hubUrl: (env.BROADCAST_WS_URL || "").trim() || null,
     sessionHoursQatar: "08:00–15:00 Asia/Qatar",
     exchange: exchangeSummary,
@@ -362,6 +618,8 @@ export function loadBroadcastSample(env: NodeJS.ProcessEnv = process.env): boole
   const raw = parseBroadcastJsonText(fs.readFileSync(file));
   applyBroadcastPayload(raw);
   sampleLoaded = true;
+  feedSource = "sample";
+  connected = false;
   console.log(`[live] Loaded broadcast sample (${quotes.size} quotes, ${indices.size} indices) from ${file}`);
   return true;
 }
@@ -516,6 +774,8 @@ function connectWebSocket(url: string): void {
     ws = socket;
     socket.addEventListener("open", () => {
       connected = true;
+      feedSource = "hub";
+      sampleLoaded = false;
       console.log(`[live] WebSocket connected ${url}`);
     });
     socket.addEventListener("message", (ev) => {
@@ -523,6 +783,8 @@ function connectWebSocket(url: string): void {
         const text = typeof ev.data === "string" ? ev.data : String(ev.data);
         const json = JSON.parse(text);
         applyBroadcastPayload(json);
+        feedSource = "hub";
+        sampleLoaded = false;
       } catch (err) {
         console.warn("[live] bad broadcast message", err instanceof Error ? err.message : err);
       }
@@ -563,10 +825,10 @@ export function startMarketBroadcast(): void {
   startCloseCron();
   const url = (process.env.BROADCAST_WS_URL || "").trim();
   const wantSample = process.env.BROADCAST_LOAD_SAMPLE !== "0";
-
-  if (wantSample) loadBroadcastSample();
+  const wantQsePublic = process.env.BROADCAST_QSE_PUBLIC !== "0";
 
   if (url) {
+    if (wantSample) loadBroadcastSample();
     if (isBroadcastSessionOpen() || process.env.BROADCAST_CONNECT_ALWAYS === "1") {
       connectWebSocket(url);
     } else {
@@ -582,20 +844,42 @@ export function startMarketBroadcast(): void {
       }
     }, 60_000);
   } else {
-    console.log("[live] No BROADCAST_WS_URL — using sample/in-memory quotes only; ticks never write stock_prices until end-of-day close job");
-    // Demo: nudge in-memory Last Prices so /live 30s poll shows flash + fresh lastMessageAt (no DB writes).
-    if (process.env.BROADCAST_SAMPLE_AUTO_TICK !== "0") {
-      setInterval(() => {
-        if (quotes.size === 0) return;
-        if (ws && connected) return;
-        simulateLiveTicks(8);
-      }, 30_000);
-      console.log("[live] Sample auto-tick every 30s (set BROADCAST_SAMPLE_AUTO_TICK=0 to disable)");
-    }
+    console.log("[live] No BROADCAST_WS_URL — trying QSE public Market Watch, then BroadcastData sample");
+    const startFallback = async () => {
+      if (wantQsePublic) {
+        const qse = await refreshFromQsePublicWebsite();
+        if (qse.ok) {
+          const pollMs = Math.max(5_000, Number(process.env.BROADCAST_QSE_POLL_MS || 15_000) || 15_000);
+          if (qsePollTimer) clearInterval(qsePollTimer);
+          qsePollTimer = setInterval(() => {
+            if (ws && connected) return;
+            void refreshFromQsePublicWebsite().catch((err) => {
+              console.warn("[live] QSE public poll error", err instanceof Error ? err.message : err);
+            });
+          }, pollMs);
+          console.log(`[live] QSE public poll every ${pollMs}ms (BROADCAST_QSE_PUBLIC=0 to disable)`);
+          return;
+        }
+        console.warn(`[live] QSE public unavailable (${qse.error ?? "unknown"}) — falling back to sample`);
+      }
+      if (wantSample) {
+        loadBroadcastSample();
+        if (process.env.BROADCAST_SAMPLE_AUTO_TICK !== "0") {
+          setInterval(() => {
+            if (quotes.size === 0) return;
+            if (feedSource === "hub" || feedSource === "qse_public") return;
+            if (ws && connected) return;
+            simulateLiveTicks(8);
+          }, 2_000);
+          console.log("[live] Sample auto-tick every 2s (set BROADCAST_SAMPLE_AUTO_TICK=0 to disable)");
+        }
+      }
+    };
+    void startFallback();
   }
 
   const status = getBroadcastStatus();
-  console.log(`[live] status connected=${status.connected} quotes=${status.quoteCount} valuation=${status.valuationSource} closeSave=${status.closeSaveLabel}`);
+  console.log(`[live] status connected=${status.connected} feed=${status.feedSource} quotes=${status.quoteCount} valuation=${status.valuationSource} closeSave=${status.closeSaveLabel}`);
 }
 
 export { todayQatarIso };

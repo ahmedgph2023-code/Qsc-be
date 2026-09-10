@@ -51,13 +51,39 @@ describe("market broadcast", () => {
     expect(status.ingestOfficialCloses).toBe(false);
   });
 
+  it("maps QSE public mw.php MarketWatch rows (PrevClosing / Trades / Volume / Value)", async () => {
+    const { mapQsePublicWatchRow } = await import("./market-broadcast.js");
+    const q = mapQsePublicWatchRow({
+      Symbol: "ABQK",
+      CompanyEN: "AL AHLI BANK",
+      CompanyAR: "البنك الأهلي",
+      LastPrice: "3.848",
+      PrevClosing: "3.855",
+      Change: "-0.007",
+      PercentChange: "-0.18",
+      BidPrice: "3.81",
+      OfferPrice: "3.90",
+      BidVolume: "2860",
+      OfferVolume: "1459",
+      Trades: "42",
+      Volume: "12000",
+      Value: "46176",
+      SectorEN: "Banks & Financial Services",
+    });
+    expect(q?.symbol).toBe("ABQK");
+    expect(q?.lastTradePrice).toBe(3.848);
+    expect(q?.closePrice).toBe(3.855);
+    expect(q?.trades).toBe(42);
+    expect(q?.totalVolume).toBe(12000);
+    expect(q?.totalValue).toBe(46176);
+  });
+
   it("simulateLiveTicks nudges last prices in memory without claiming DB writes", async () => {
     const { simulateLiveTicks } = await import("./market-broadcast.js");
     applyBroadcastPayload(sample);
     const before = getLiveLastPriceMap().get("MHAR");
     const { touched } = simulateLiveTicks(5);
     expect(touched.length).toBeGreaterThan(0);
-    // At least one of the sample symbols may move; map still has values.
     expect(getLiveLastPriceMap().size).toBeGreaterThanOrEqual(2);
     expect(before).toBeTypeOf("number");
   });
