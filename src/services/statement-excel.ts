@@ -173,17 +173,10 @@ function portfolioRows(stmt: PortfolioStatement): { rows: StyledRow[]; mins: num
       ["Market Value", num(stmt.grandTotalMarketValue)],
       ["Expected Profit/Loss", money(stmt.footer.expectedProfitLoss)],
       ["Expected Sell Commission", money(stmt.footer.expectedSellCommission)],
-      ["Net (after expected sell commission)", money(stmt.footer.netAfterExpectedSellComm)],
-      ["Currency Difference", money(stmt.footer.currencyDifference)],
       ["Dr/Cr Balance", money(stmt.footer.drCrBalance)],
       ["Realized Trading P/L", money(stmt.footer.realizedTradingPl)],
-      ["Received Profits", money(stmt.footer.receivedProfits)],
-      ["Non-Received Profits", money(stmt.footer.nonReceivedProfits)],
       ["Realized total", money(stmt.footer.realizedTotal)],
-      ["Client Net Cash Balance", money(stmt.footer.clientNetCashBalance)],
-      ["Net Profit/Loss", money(stmt.footer.netProfitLoss)],
-      ["Net Asset Value", money(stmt.footer.netAssetValue)],
-      ["Cash Ledger", money(stmt.footer.cashLedgerBalance)],
+      ["Total Asset", money(stmt.footer.totalAsset)],
     ]),
   );
   if (stmt.missingCloses.length > 0) {

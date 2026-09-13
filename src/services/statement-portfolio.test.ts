@@ -52,6 +52,7 @@ describe("portfolio statement engine", () => {
     expect(stmt.footer.realizedTradingPl.value).toBe(p.realizedTradingPl);
     expect(stmt.footer.netProfitLoss.value).toBeCloseTo(p.profitPrinted + p.realizedTradingPl, 2);
     expect(stmt.footer.netAssetValue.value).toBeCloseTo(p.marketValue - p.expectedSellComm + cash, 2);
+    expect(stmt.footer.totalAsset.value).toBeCloseTo(p.marketValue + cash, 2);
     expect(stmt.missingCloses).toEqual([]);
   });
 

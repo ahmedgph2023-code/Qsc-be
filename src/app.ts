@@ -31,6 +31,7 @@ import {
 import systemConfigRoutes from "./routes/system-config.js";
 import usersRoutes from "./routes/users.js";
 import extClientsRoutes from "./routes/ext-clients.js";
+import extInvestmentRoutes from "./routes/ext-investment.js";
 import snapshotsRoutes from "./routes/snapshots.js";
 import liveRoutes from "./routes/live.js";
 import productDecisionsRoutes from "./routes/product-decisions.js";
@@ -86,6 +87,7 @@ app.use("/api/indices", indicesRoutes);
 app.use("/api/stocks", stocksRoutes);
 app.use("/api/customers", customersRoutes);
 app.use("/api/ext/clients", extClientsRoutes);
+app.use("/api/ext/investment", extInvestmentRoutes);
 app.use("/api/portfolios", phase1PortfoliosRoutes);
 app.use("/api/portfolios", portfoliosRoutes);
 app.use("/api/transactions", transactionsRoutes);

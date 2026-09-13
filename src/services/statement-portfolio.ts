@@ -187,9 +187,12 @@ export function assemblePortfolioStatement(input: {
     grandTotalMarketValue == null || expectedSellCommission == null
       ? null
       : round4(grandTotalMarketValue - expectedSellCommission);
-  // س-04: NAV = MV − expected sell commission + client cash
+  // س-04: NAV = MV − expected sell commission + client cash (kept for API; not shown after FB-PF-TRIM)
   const netAssetValue =
     netAfterExpectedSellComm == null ? null : round4(netAfterExpectedSellComm + cash);
+  // Client 2026-09: Total Asset = Market Value + Client Balance (cash / Dr-Cr)
+  const totalAsset =
+    grandTotalMarketValue == null ? null : round4(grandTotalMarketValue + cash);
   // س-03: Dr/Cr and client net cash = cash balance that day
   const netProfitLoss =
     expectedProfitLoss == null ? null : round4(expectedProfitLoss + input.realizedToAsOf);
@@ -228,6 +231,7 @@ export function assemblePortfolioStatement(input: {
       netProfitLoss: netProfitLoss == null ? unknownMoney("MISSING_CLOSE") : engineMoney(netProfitLoss),
       netAssetValue: netAssetValue == null ? unknownMoney("MISSING_CLOSE") : engineMoney(netAssetValue),
       cashLedgerBalance: cashMoney,
+      totalAsset: totalAsset == null ? unknownMoney("MISSING_CLOSE") : engineMoney(totalAsset),
     },
     print: { printedAtIso: input.printedAtIso, page: null },
   };
