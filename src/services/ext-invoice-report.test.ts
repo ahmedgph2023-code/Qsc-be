@@ -1,4 +1,13 @@
-import { getInvoiceReport, invoiceSideFromInvType, sumInvoiceTotals, mapInvoiceReportRow } from "./ext-invoice-report.js";
+import {
+  getInvoiceReport,
+  invTypeFromOrderType,
+  invoiceSideFromInvType,
+  listInvoiceClients,
+  mapInvoiceClientOption,
+  mapInvoiceReportRow,
+  normalizeOrderType,
+  sumInvoiceTotals,
+} from "./ext-invoice-report.js";
 import { describe, expect, it, vi } from "vitest";
 
 vi.mock("../db/mssql.js", () => ({
@@ -15,9 +24,10 @@ describe("invoiceSideFromInvType", () => {
 });
 
 describe("mapInvoiceReportRow", () => {
-  it("splits buy/sell qty and keeps SQL commission fields", () => {
+  it("keeps side and SQL commission fields", () => {
     const buy = mapInvoiceReportRow({
       InvNo: 323860,
+      InvoiceSequence: 4471,
       InvType: "OI",
       ClientId: 2041933,
       Nin: "47016",
@@ -35,10 +45,37 @@ describe("mapInvoiceReportRow", () => {
       CL_CLIENT_TYPE: "INV PORT",
     });
     expect(buy?.orderSide).toBe("Buy");
-    expect(buy?.buyQty).toBe(600000);
-    expect(buy?.sellQty).toBe(0);
+    expect(buy?.qty).toBe(600000);
     expect(buy?.totalComm).toBe(2608.78);
     expect(buy?.market).toBe("QATAR STOCK EXCHANGE");
+  });
+
+  // Client 19 Sep 2026: the column labelled "Invoice Sequence" was showing InvNo.
+  it("reads sequence from InvoiceSequence and number from InvNo", () => {
+    const row = mapInvoiceReportRow({
+      InvNo: 323860,
+      InvoiceSequence: 4471,
+      InvType: "OC",
+      ClientId: 2041933,
+      Qty: 100,
+      InvDate: "2026-09-09",
+      TickerId: "QNBK",
+    });
+    expect(row?.invSequence).toBe(4471);
+    expect(row?.invNo).toBe(323860);
+  });
+
+  it("leaves sequence null when the feed omits it instead of falling back to InvNo", () => {
+    const row = mapInvoiceReportRow({
+      InvNo: 323860,
+      InvType: "OI",
+      ClientId: 1,
+      Qty: 1,
+      InvDate: "2026-09-09",
+      TickerId: "QNBK",
+    });
+    expect(row?.invSequence).toBeNull();
+    expect(row?.invNo).toBe(323860);
   });
 });
 
@@ -57,13 +94,45 @@ describe("sumInvoiceTotals", () => {
     const t = sumInvoiceTotals(rows);
     expect(t.count).toBe(2);
     expect(t.amount).toBe(150);
-    expect(t.buyQty).toBe(10);
-    expect(t.sellQty).toBe(5);
+    expect(t.qty).toBe(15);
+    expect(t.net).toBe(150);
+  });
+});
+
+describe("order type filter", () => {
+  it("maps the three choices to InvType", () => {
+    expect(invTypeFromOrderType("buy")).toBe("OI");
+    expect(invTypeFromOrderType("sell")).toBe("OC");
+    expect(invTypeFromOrderType("all")).toBeNull();
+  });
+
+  it("falls back to all for anything unexpected in the query string", () => {
+    expect(normalizeOrderType("BUY")).toBe("buy");
+    expect(normalizeOrderType(" sell ")).toBe("sell");
+    expect(normalizeOrderType("both")).toBe("all");
+    expect(normalizeOrderType(undefined)).toBe("all");
+  });
+});
+
+describe("mapInvoiceClientOption", () => {
+  it("builds a customer option with its invoice count", () => {
+    const option = mapInvoiceClientOption({
+      ClientId: 2041933,
+      Nin: "47016",
+      InvoiceCount: 12,
+      NAME_EN: "FAHAD",
+    });
+    expect(option).toEqual({ clientId: 2041933, nin: "47016", name: "FAHAD", invoiceCount: 12 });
+  });
+
+  it("skips rows without a client id", () => {
+    expect(mapInvoiceClientOption({ Nin: "47016" })).toBeNull();
   });
 });
 
 describe("getInvoiceReport wiring", () => {
   it("is exported", () => {
     expect(typeof getInvoiceReport).toBe("function");
+    expect(typeof listInvoiceClients).toBe("function");
   });
 });

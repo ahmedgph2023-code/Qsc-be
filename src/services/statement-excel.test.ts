@@ -78,13 +78,14 @@ describe("statement excel", () => {
     expect(csv).toContain("SAAD");
     expect(csv).toContain("MHAR");
     expect(csv).toContain("AL MAHHAR HOLDING COMPANY");
-    expect(csv).toContain("Cash Ledger");
-    expect(csv).toContain("170494.61");
     expect(csv).toContain("Realized Trading P/L");
     expect(csv).toContain("15136.16");
     expect(csv).toContain("Expected Sell Commission");
-    expect(csv).toContain("Net Asset Value");
+    expect(csv).toContain("Total Asset");
     expect(csv).toContain("TOTAL");
+    // FB-PF-TRIM (13 Sep 2026): the client struck these off the portfolio sheet.
+    expect(csv).not.toContain("Cash Ledger");
+    expect(csv).not.toContain("Net Asset Value");
     const styled = StyleXLSX.read(buffer, { type: "buffer", cellStyles: true });
     const header = Object.keys(styled.Sheets.Portfolio).find((addr) => styled.Sheets.Portfolio[addr]?.v === "Company");
     expect(header).toBeTruthy();

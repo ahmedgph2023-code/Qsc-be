@@ -90,12 +90,22 @@ type BroadcastStatus = {
   quoteCount: number;
   indexCount: number;
   lastMessageAt: string | null;
+  /** Seconds since the feed last delivered data (null = never). */
+  feedAgeSeconds: number | null;
+  staleAfterSeconds: number;
+  stale: boolean;
+  /** True only when Hub data is fresh and untouched by QA simulation. */
+  valuationTrusted: boolean;
+  syntheticTicks: boolean;
   sessionOpen: boolean;
   ingestOfficialCloses: boolean;
   valuationSource: "official_close" | "last_price_session";
   objectsNamedByQsc: string[];
-  blockedReason: "NO_BROADCAST_WS_URL" | "IDLE" | null;
+  blockedReason: "NO_BROADCAST_WS_URL" | "IDLE" | "STALE_FEED" | "UNTRUSTED_FEED" | null;
   hubUrl: string | null;
+  /** All configured hub endpoints, in try order. */
+  hubUrls: string[];
+  hubTransport: "signalr_ws_skip_negotiation" | "signalr_negotiate" | "websocket" | null;
   sessionHoursQatar: string;
   exchange: LiveExchangeSummary | null;
   /** Asia/Qatar clock when Last Price is saved as official close. */
@@ -116,10 +126,18 @@ let lastMessageAt: string | null = null;
 let connected = false;
 let sampleLoaded = false;
 let feedSource: FeedSource = "none";
+/** Set when any in-memory price was synthesised for QA — blocks valuation and close writes. */
+let syntheticTicks = false;
 let ws: WebSocket | null = null;
+/** @microsoft/signalr HubConnection, kept loose so the import stays lazy. */
+let hub: { stop: () => Promise<void> } | null = null;
 let closeCronTask: ReturnType<typeof cron.schedule> | null = null;
 let closeSaveConfig: LiveCloseSaveConfig = { hour: 15, minute: 5 };
 let qsePollTimer: ReturnType<typeof setInterval> | null = null;
+let qseFetchInFlight = false;
+let feedConnectInFlight = false;
+/** Which hub candidate is actually serving data right now. */
+let activeHubUrl: string | null = null;
 
 const QSE_MW_URLS = [
   "https://www.qe.com.qa/wp/mw/bg/mw.php",
@@ -144,6 +162,27 @@ function asText(v: unknown): string | null {
   const s = String(v).trim();
   if (!s || s.includes("\uFFFD")) return null;
   return s;
+}
+
+/** Field names the QSE feed uses for the executed-trade count, in priority order. */
+const TRADE_COUNT_FIELDS = [
+  "executed",
+  "Executed",
+  "noOfTrades",
+  "NoOfTrades",
+  "numberOfTrades",
+  "totalTrades",
+  "TotalTrades",
+  "trades",
+  "Trades",
+] as const;
+
+function pickTradeCount(row: Record<string, unknown>): number | null {
+  for (const field of TRADE_COUNT_FIELDS) {
+    const value = toNum(row[field]);
+    if (value != null) return value;
+  }
+  return null;
 }
 
 function pickCompanyNameEn(row: Record<string, unknown>): string | null {
@@ -208,7 +247,53 @@ export function isBroadcastSessionOpen(d = new Date()): boolean {
 }
 
 export function isBroadcastUrlConfigured(env: NodeJS.ProcessEnv = process.env): boolean {
-  return Boolean((env.BROADCAST_WS_URL || "").trim());
+  return Boolean((env.BROADCAST_WS_URL || "").trim() || (env.BROADCAST_WS_URL_LOCAL || "").trim());
+}
+
+function hubTransportLabel(
+  env: NodeJS.ProcessEnv = process.env,
+): "signalr_ws_skip_negotiation" | "signalr_negotiate" | "websocket" | null {
+  const first = hubUrlCandidates(env)[0];
+  if (!first) return null;
+  if (!/^https?:\/\//i.test(first)) return "websocket";
+  return env.BROADCAST_HUB_NEGOTIATE === "1" ? "signalr_negotiate" : "signalr_ws_skip_negotiation";
+}
+
+function staleAfterSeconds(env: NodeJS.ProcessEnv = process.env): number {
+  const n = Number(env.BROADCAST_STALE_SECONDS ?? 60);
+  return Number.isFinite(n) && n > 0 ? Math.trunc(n) : 60;
+}
+
+function feedAgeSeconds(): number | null {
+  if (!lastMessageAt) return null;
+  const ms = Date.parse(lastMessageAt);
+  if (!Number.isFinite(ms)) return null;
+  return Math.max(0, Math.round((Date.now() - ms) / 1000));
+}
+
+function isFeedStale(env: NodeJS.ProcessEnv = process.env): boolean {
+  const age = feedAgeSeconds();
+  return age == null || age > staleAfterSeconds(env);
+}
+
+/**
+ * Client decision (17 Sep 2026): only the QSC Hub may value portfolios or write
+ * official closes. The public qe.com.qa snapshot and QA simulation are different
+ * numbers from the firm's own Market Watch, so they must never reach money paths.
+ */
+function isValuationTrusted(env: NodeJS.ProcessEnv = process.env): boolean {
+  return feedSource === "hub" && !syntheticTicks && !isFeedStale(env);
+}
+
+/** Rows from two different feeds must never share one board. */
+function setFeedSource(next: FeedSource): void {
+  if (feedSource !== next) {
+    quotes.clear();
+    indices.clear();
+    exchangeSummary = null;
+    syntheticTicks = false;
+  }
+  feedSource = next;
 }
 
 function samplePath(env: NodeJS.ProcessEnv = process.env): string | null {
@@ -228,7 +313,14 @@ export function parseBroadcastPayload(payload: unknown): {
   exchange: LiveExchangeSummary | null;
 } {
   const root = payload as Record<string, unknown>;
-  const dataArr = Array.isArray(root.Data) ? root.Data : Array.isArray(root.data) ? root.data : [root];
+  // Envelope (`{ Data: [...] }`), or the Data array handed over directly by the hub.
+  const dataArr = Array.isArray(payload)
+    ? payload
+    : Array.isArray(root.Data)
+      ? root.Data
+      : Array.isArray(root.data)
+        ? root.data
+        : [root];
   const bag = (dataArr[0] ?? {}) as Record<string, unknown>;
   const now = new Date().toISOString();
   const outQuotes: LiveQuote[] = [];
@@ -295,7 +387,9 @@ export function parseBroadcastPayload(payload: unknown): {
           bidVolume: toNum(row.bidVolume) ?? toNum(row.totalBidVolume),
           offerVolume: toNum(row.offerVolume) ?? toNum(row.totalOfferVolume),
           lastTradeVolume: toNum(row.lastTradeVolume),
-          trades: toNum(row.executed),
+          // Executed trade count. QSC reported this column as wrong, so read every
+          // unambiguous trade-count name the hub may use instead of only `executed`.
+          trades: pickTradeCount(row),
           totalVolume: toNum(row.totalVolume),
           totalValue: toNum(row.totalValue),
           companyName: pickCompanyNameEn(row),
@@ -329,13 +423,16 @@ export function parseBroadcastPayload(payload: unknown): {
   return { quotes: outQuotes, indices: outIndices, exchange: outExchange };
 }
 
-export function applyBroadcastPayload(payload: unknown): { quoteCount: number; indexCount: number } {
+export function applyBroadcastPayload(
+  payload: unknown,
+  source: Extract<FeedSource, "hub" | "sample"> = "hub",
+): { quoteCount: number; indexCount: number } {
   const parsed = parseBroadcastPayload(payload);
+  setFeedSource(source);
   for (const q of parsed.quotes) quotes.set(q.symbol, q);
   for (const ix of parsed.indices) indices.set(ix.code, ix);
   if (parsed.exchange) exchangeSummary = parsed.exchange;
   lastMessageAt = new Date().toISOString();
-  if (feedSource === "none") feedSource = "hub";
   return { quoteCount: parsed.quotes.length, indexCount: parsed.indices.length };
 }
 
@@ -434,10 +531,13 @@ function applyQsePublicWatch(rows: Record<string, unknown>[]): number {
   for (const row of rows) {
     const q = mapQsePublicWatchRow(row, now);
     if (!q) continue;
-    quotes.set(q.symbol, q);
     mapped.push(q);
   }
   if (mapped.length === 0) return 0;
+  // Snapshot feed: replace the board so a symbol dropped upstream cannot linger.
+  setFeedSource("qse_public");
+  quotes.clear();
+  for (const q of mapped) quotes.set(q.symbol, q);
   exchangeSummary = {
     ...exchangeFromQuotes(mapped),
     currentValue: exchangeSummary?.currentValue ?? null,
@@ -446,7 +546,6 @@ function applyQsePublicWatch(rows: Record<string, unknown>[]): number {
   };
   lastMessageAt = now;
   sampleLoaded = false;
-  feedSource = "qse_public";
   connected = true;
   return mapped.length;
 }
@@ -503,6 +602,18 @@ export async function refreshFromQsePublicWebsite(): Promise<{ ok: boolean; quot
   if (process.env.BROADCAST_QSE_PUBLIC === "0") {
     return { ok: false, quoteCount: 0, error: "DISABLED" };
   }
+  // A single fetch can take 25s (plus the PowerShell retry), so a 15s poll would
+  // otherwise stack requests and let an older snapshot overwrite a newer one.
+  if (qseFetchInFlight) return { ok: false, quoteCount: 0, error: "IN_FLIGHT" };
+  qseFetchInFlight = true;
+  try {
+    return await fetchQsePublicWatch();
+  } finally {
+    qseFetchInFlight = false;
+  }
+}
+
+async function fetchQsePublicWatch(): Promise<{ ok: boolean; quoteCount: number; error?: string }> {
   let lastErr = "NO_ENDPOINT";
   for (const url of QSE_MW_URLS) {
     try {
@@ -560,6 +671,9 @@ export async function refreshFromQsePublicWebsite(): Promise<{ ok: boolean; quot
       console.warn(`[live] QSE public fetch failed ${url}: ${lastErr}`);
     }
   }
+  // Keep the last snapshot on screen but stop claiming the feed is connected;
+  // the status age/stale flags are what the UI shows the user.
+  connected = false;
   return { ok: false, quoteCount: 0, error: lastErr };
 }
 
@@ -575,9 +689,14 @@ export function getLiveExchangeSummary(): LiveExchangeSummary | null {
   return exchangeSummary;
 }
 
-/** Last trade prices by ticker for valuation (session). */
+/**
+ * Last trade prices by ticker for valuation (session).
+ * Empty unless the Hub feed is live, fresh and free of QA simulation — a wrong
+ * Last Price silently becomes a wrong portfolio NAV.
+ */
 export function getLiveLastPriceMap(): Map<string, number> {
   const out = new Map<string, number>();
+  if (!isValuationTrusted()) return out;
   for (const q of quotes.values()) {
     if (q.lastTradePrice > 0) out.set(q.symbol, q.lastTradePrice);
   }
@@ -590,20 +709,35 @@ export function getBroadcastStatus(env: NodeJS.ProcessEnv = process.env): Broadc
   const session = isBroadcastSessionOpen();
   const close = getCloseSaveConfig();
   const liveFeed = feedSource === "hub" || feedSource === "qse_public";
+  const stale = isFeedStale(env);
+  const trusted = isValuationTrusted(env);
   return {
     configured,
-    connected: liveFeed && (connected || hasQuotes),
+    connected: liveFeed && !stale && (connected || hasQuotes),
     sampleLoaded,
     feedSource,
     quoteCount: quotes.size,
     indexCount: indices.size,
     lastMessageAt,
+    feedAgeSeconds: feedAgeSeconds(),
+    staleAfterSeconds: staleAfterSeconds(env),
+    stale,
+    valuationTrusted: trusted,
+    syntheticTicks,
     sessionOpen: session,
     ingestOfficialCloses: false,
-    valuationSource: session && hasQuotes ? "last_price_session" : "official_close",
+    valuationSource: trusted && session ? "last_price_session" : "official_close",
     objectsNamedByQsc: [...BROADCAST_OBJECT_NAMES],
-    blockedReason: configured || hasQuotes ? null : "NO_BROADCAST_WS_URL",
-    hubUrl: (env.BROADCAST_WS_URL || "").trim() || null,
+    blockedReason: !configured && !hasQuotes
+      ? "NO_BROADCAST_WS_URL"
+      : hasQuotes && stale
+        ? "STALE_FEED"
+        : hasQuotes && !trusted
+          ? "UNTRUSTED_FEED"
+          : null,
+    hubUrl: activeHubUrl ?? hubUrlCandidates(env)[0] ?? null,
+    hubUrls: hubUrlCandidates(env),
+    hubTransport: hubTransportLabel(env),
     sessionHoursQatar: "08:00–15:00 Asia/Qatar",
     exchange: exchangeSummary,
     closeSaveHour: close.hour,
@@ -616,9 +750,8 @@ export function loadBroadcastSample(env: NodeJS.ProcessEnv = process.env): boole
   const file = samplePath(env);
   if (!file) return false;
   const raw = parseBroadcastJsonText(fs.readFileSync(file));
-  applyBroadcastPayload(raw);
+  applyBroadcastPayload(raw, "sample");
   sampleLoaded = true;
-  feedSource = "sample";
   connected = false;
   console.log(`[live] Loaded broadcast sample (${quotes.size} quotes, ${indices.size} indices) from ${file}`);
   return true;
@@ -725,7 +858,14 @@ async function upsertClosePrices(asOf: string, priceByTicker: Map<string, number
 }
 
 /** Persist in-memory Last Price as official close for the Qatar calendar day (س-25). */
-export async function persistSessionCloses(asOf = todayQatarIso()): Promise<{ asOf: string; written: number }> {
+export async function persistSessionCloses(
+  asOf = todayQatarIso(),
+): Promise<{ asOf: string; written: number; skipped?: string }> {
+  if (!isValuationTrusted()) {
+    const reason = feedSource !== "hub" ? `FEED_${feedSource.toUpperCase()}` : syntheticTicks ? "SYNTHETIC_TICKS" : "STALE_FEED";
+    console.warn(`[live] Session close ingest refused asOf=${asOf} reason=${reason}`);
+    return { asOf, written: 0, skipped: reason };
+  }
   const written = await upsertClosePrices(asOf, getLiveLastPriceMap());
   console.log(`[live] Session close ingest asOf=${asOf} written=${written}`);
   return { asOf, written };
@@ -759,7 +899,197 @@ export function simulateLiveTicks(count = 8): { touched: string[] } {
   }
   lastMessageAt = new Date().toISOString();
   sampleLoaded = true;
+  syntheticTicks = true;
   return { touched: [...new Set(touched)] };
+}
+
+/**
+ * QSC hub (`http://…/qscapi/hub`) is ASP.NET SignalR: the meeting sample is one
+ * `broadcastMessage` invocation envelope (`ClientMethod` + `Data`). Extra names can
+ * be added with BROADCAST_HUB_EVENTS once the real method list is confirmed on site.
+ */
+const HUB_CLIENT_METHODS = ["broadcastMessage", "BroadcastMessage", "broadcastData", "ReceiveMessage"] as const;
+
+function hubEventNames(env: NodeJS.ProcessEnv = process.env): string[] {
+  const extra = (env.BROADCAST_HUB_EVENTS || "").split(",").map((s) => s.trim()).filter(Boolean);
+  return [...new Set([...HUB_CLIENT_METHODS, ...extra])];
+}
+
+function broadcastContentScore(payload: unknown): number {
+  try {
+    const parsed = parseBroadcastPayload(payload);
+    return parsed.quotes.length + parsed.indices.length + (parsed.exchange ? 1 : 0);
+  } catch {
+    return -1;
+  }
+}
+
+/** The hub may hand us one object, JSON text, or several arguments — take the richest. */
+export function bestHubPayload(args: unknown[]): unknown {
+  const candidates: unknown[] = [];
+  for (const arg of args) {
+    candidates.push(arg);
+    if (typeof arg === "string") {
+      try {
+        candidates.push(JSON.parse(arg));
+      } catch {
+        /* not JSON text */
+      }
+    }
+  }
+  if (args.length > 1) candidates.push({ Data: args });
+  let best: unknown = candidates[0] ?? {};
+  let bestScore = -1;
+  for (const candidate of candidates) {
+    const score = broadcastContentScore(candidate);
+    if (score > bestScore) {
+      bestScore = score;
+      best = candidate;
+    }
+  }
+  return best;
+}
+
+function isSignalRUrl(url: string): boolean {
+  return /^https?:\/\//i.test(url);
+}
+
+/**
+ * Hub endpoints, in the order we try them. QSC gave a LAN address and a public
+ * one; the LAN host only resolves inside the office/VPN, so it is opt-in first
+ * and the public hub is the dependable default.
+ */
+export function hubUrlCandidates(env: NodeJS.ProcessEnv = process.env): string[] {
+  const local = (env.BROADCAST_WS_URL_LOCAL || "").trim();
+  const primary = (env.BROADCAST_WS_URL || "").trim();
+  return [...new Set([local, primary].filter(Boolean))];
+}
+
+/**
+ * QSC sample connects with Skip Negotiation + WebSockets transport. Negotiation
+ * would need a second HTTP round trip their hub does not serve, so keep these
+ * options aligned with the sample; BROADCAST_HUB_NEGOTIATE=1 re-enables the
+ * default handshake if a deployment ever needs it.
+ */
+function signalRHttpOptions(signalR: typeof import("@microsoft/signalr")) {
+  const negotiate = process.env.BROADCAST_HUB_NEGOTIATE === "1";
+  return {
+    skipNegotiation: !negotiate,
+    transport: signalR.HttpTransportType.WebSockets,
+    withCredentials: false,
+  };
+}
+
+async function connectSignalRHub(url: string): Promise<void> {
+  try {
+    await hub?.stop();
+  } catch {
+    /* ignore */
+  }
+  hub = null;
+  try {
+    const signalR = await import("@microsoft/signalr");
+    const connection = new signalR.HubConnectionBuilder()
+      .withUrl(url, signalRHttpOptions(signalR))
+      .withAutomaticReconnect([0, 2_000, 5_000, 10_000, 15_000])
+      // Information level prints "No client method with the name 'x' found",
+      // which is how we discover the hub's real method names on site.
+      .configureLogging(signalR.LogLevel.Information)
+      .build();
+
+    for (const name of hubEventNames()) {
+      connection.on(name, (...args: unknown[]) => {
+        try {
+          applyBroadcastPayload(bestHubPayload(args), "hub");
+          sampleLoaded = false;
+          connected = true;
+        } catch (err) {
+          console.warn("[live] bad hub message", err instanceof Error ? err.message : err);
+        }
+      });
+    }
+    connection.onreconnecting(() => {
+      connected = false;
+      console.warn("[live] SignalR reconnecting");
+    });
+    connection.onreconnected(() => {
+      connected = true;
+      console.log("[live] SignalR reconnected");
+    });
+    connection.onclose(() => {
+      connected = false;
+      console.log("[live] SignalR closed — retry in 15s");
+      setTimeout(() => {
+        if (isBroadcastUrlConfigured() && isBroadcastSessionOpen()) connectFeed();
+      }, 15_000);
+    });
+
+    hub = connection;
+    await connection.start();
+    connected = true;
+    setFeedSource("hub");
+    console.log(`[live] SignalR hub connected ${url}`);
+
+    // Some hubs only start streaming after the client subscribes.
+    const invokes = (process.env.BROADCAST_HUB_INVOKE || "").split(",").map((s) => s.trim()).filter(Boolean);
+    for (const method of invokes) {
+      try {
+        await connection.invoke(method);
+        console.log(`[live] hub invoke ok: ${method}`);
+      } catch (err) {
+        console.warn(`[live] hub invoke failed: ${method} — ${err instanceof Error ? err.message : err}`);
+      }
+    }
+  } catch (err) {
+    connected = false;
+    console.warn("[live] SignalR connect failed", err instanceof Error ? err.message : err);
+  }
+}
+
+/**
+ * Try each configured hub in order until one is live. Route by scheme:
+ * http(s) = SignalR hub, ws(s) = raw WebSocket feed.
+ */
+async function connectFeedChain(): Promise<void> {
+  if (feedConnectInFlight) return;
+  feedConnectInFlight = true;
+  try {
+    const candidates = hubUrlCandidates();
+    for (const candidate of candidates) {
+      if (isSignalRUrl(candidate)) {
+        await connectSignalRHub(candidate);
+      } else {
+        connectWebSocket(candidate);
+        // Raw sockets open asynchronously — give the handshake a moment.
+        await new Promise((resolve) => setTimeout(resolve, 1_500));
+      }
+      if (connected) {
+        activeHubUrl = candidate;
+        return;
+      }
+      if (candidates.length > 1) console.warn(`[live] hub not reachable: ${candidate}`);
+    }
+    activeHubUrl = null;
+  } finally {
+    feedConnectInFlight = false;
+  }
+}
+
+function connectFeed(): void {
+  void connectFeedChain();
+}
+
+function disconnectFeed(): void {
+  try {
+    ws?.close();
+  } catch {
+    /* ignore */
+  }
+  ws = null;
+  void hub?.stop().catch(() => undefined);
+  hub = null;
+  connected = false;
+  activeHubUrl = null;
 }
 
 function connectWebSocket(url: string): void {
@@ -774,7 +1104,7 @@ function connectWebSocket(url: string): void {
     ws = socket;
     socket.addEventListener("open", () => {
       connected = true;
-      feedSource = "hub";
+      setFeedSource("hub");
       sampleLoaded = false;
       console.log(`[live] WebSocket connected ${url}`);
     });
@@ -782,8 +1112,7 @@ function connectWebSocket(url: string): void {
       try {
         const text = typeof ev.data === "string" ? ev.data : String(ev.data);
         const json = JSON.parse(text);
-        applyBroadcastPayload(json);
-        feedSource = "hub";
+        applyBroadcastPayload(json, "hub");
         sampleLoaded = false;
       } catch (err) {
         console.warn("[live] bad broadcast message", err instanceof Error ? err.message : err);
@@ -793,7 +1122,7 @@ function connectWebSocket(url: string): void {
       connected = false;
       console.log("[live] WebSocket closed — retry in 15s");
       setTimeout(() => {
-        if (isBroadcastUrlConfigured() && isBroadcastSessionOpen()) connectWebSocket(url);
+        if (isBroadcastUrlConfigured() && isBroadcastSessionOpen()) connectFeed();
       }, 15_000);
     });
     socket.addEventListener("error", () => {
@@ -803,6 +1132,24 @@ function connectWebSocket(url: string): void {
     console.warn("[live] WebSocket connect failed", err instanceof Error ? err.message : err);
     connected = false;
   }
+}
+
+/**
+ * QA-only public snapshot poll (BROADCAST_QSE_PUBLIC=1). The timer is installed
+ * before the first fetch so one failed attempt cannot freeze the board all day.
+ */
+function startQsePublicPolling(): void {
+  const pollMs = Math.max(5_000, Number(process.env.BROADCAST_QSE_POLL_MS || 15_000) || 15_000);
+  if (qsePollTimer) clearInterval(qsePollTimer);
+  const tick = () => {
+    if (ws && connected) return;
+    void refreshFromQsePublicWebsite().catch((err) => {
+      console.warn("[live] QSE public poll error", err instanceof Error ? err.message : err);
+    });
+  };
+  qsePollTimer = setInterval(tick, pollMs);
+  tick();
+  console.log(`[live] QSE public poll every ${pollMs}ms — QA source, never used for valuation`);
 }
 
 function startCloseCron(): void {
@@ -823,59 +1170,31 @@ function startCloseCron(): void {
 export function startMarketBroadcast(): void {
   closeSaveConfig = readCloseConfigFromDisk() ?? envCloseConfig();
   startCloseCron();
-  const url = (process.env.BROADCAST_WS_URL || "").trim();
-  const wantSample = process.env.BROADCAST_LOAD_SAMPLE !== "0";
-  const wantQsePublic = process.env.BROADCAST_QSE_PUBLIC !== "0";
+  const candidates = hubUrlCandidates();
+  // Client decision (17 Sep 2026): without the Hub, show nothing. A different
+  // source or a simulated tick must never be presented as the firm's market data.
+  const wantQsePublic = process.env.BROADCAST_QSE_PUBLIC === "1";
 
-  if (url) {
-    if (wantSample) loadBroadcastSample();
+  if (candidates.length > 0) {
+    for (const candidate of candidates) {
+      console.log(`[live] Hub candidate = ${isSignalRUrl(candidate) ? "SignalR" : "WebSocket"} ${candidate}`);
+    }
     if (isBroadcastSessionOpen() || process.env.BROADCAST_CONNECT_ALWAYS === "1") {
-      connectWebSocket(url);
+      connectFeed();
     } else {
       console.log("[live] Hub URL set; waiting for Qatar session 08:00–15:00 to connect");
     }
     setInterval(() => {
-      if (!url) return;
-      if (isBroadcastSessionOpen() && !connected) connectWebSocket(url);
-      if (!isBroadcastSessionOpen() && ws) {
-        try { ws.close(); } catch { /* ignore */ }
-        ws = null;
-        connected = false;
-      }
+      if (isBroadcastSessionOpen() && !connected) connectFeed();
+      if (!isBroadcastSessionOpen() && (ws || hub)) disconnectFeed();
     }, 60_000);
+  } else if (wantQsePublic) {
+    startQsePublicPolling();
   } else {
-    console.log("[live] No BROADCAST_WS_URL — trying QSE public Market Watch, then BroadcastData sample");
-    const startFallback = async () => {
-      if (wantQsePublic) {
-        const qse = await refreshFromQsePublicWebsite();
-        if (qse.ok) {
-          const pollMs = Math.max(5_000, Number(process.env.BROADCAST_QSE_POLL_MS || 15_000) || 15_000);
-          if (qsePollTimer) clearInterval(qsePollTimer);
-          qsePollTimer = setInterval(() => {
-            if (ws && connected) return;
-            void refreshFromQsePublicWebsite().catch((err) => {
-              console.warn("[live] QSE public poll error", err instanceof Error ? err.message : err);
-            });
-          }, pollMs);
-          console.log(`[live] QSE public poll every ${pollMs}ms (BROADCAST_QSE_PUBLIC=0 to disable)`);
-          return;
-        }
-        console.warn(`[live] QSE public unavailable (${qse.error ?? "unknown"}) — falling back to sample`);
-      }
-      if (wantSample) {
-        loadBroadcastSample();
-        if (process.env.BROADCAST_SAMPLE_AUTO_TICK !== "0") {
-          setInterval(() => {
-            if (quotes.size === 0) return;
-            if (feedSource === "hub" || feedSource === "qse_public") return;
-            if (ws && connected) return;
-            simulateLiveTicks(8);
-          }, 2_000);
-          console.log("[live] Sample auto-tick every 2s (set BROADCAST_SAMPLE_AUTO_TICK=0 to disable)");
-        }
-      }
-    };
-    void startFallback();
+    console.warn(
+      "[live] BROADCAST_WS_URL is not set — Market Watch stays empty. " +
+      "No substitute feed and no simulated prices (set BROADCAST_QSE_PUBLIC=1 only for QA).",
+    );
   }
 
   const status = getBroadcastStatus();

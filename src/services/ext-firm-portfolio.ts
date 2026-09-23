@@ -1,6 +1,7 @@
 import { getMssqlPool, sql } from "../db/mssql.js";
 import { getPortfolioStatement, getRealizedSummaryStatement } from "./ext-sql-clients.js";
 import { toNum } from "./ext-sql-portfolio.js";
+import { formatDmY } from "./ext-invoice-report.js";
 
 const round4 = (n: number) => Math.round(n * 10000) / 10000;
 const roundPct = (n: number) => Math.round(n * 10000) / 10000;
@@ -15,6 +16,7 @@ function pick(row: Record<string, unknown>, ...keys: string[]): unknown {
 export type FirmPortfolioHolder = {
   ticker: string;
   companyName: string;
+  sector: string | null;
   clientId: number;
   clientName: string;
   nin: string;
@@ -26,11 +28,14 @@ export type FirmPortfolioHolder = {
   unrealizedPl: number | null;
   returnPct: number | null;
   realizedPl: number;
+  /** Share of this stock's market value held by this client (drill-down only). */
+  holderPct: number | null;
 };
 
 export type FirmPortfolioStock = {
   ticker: string;
   companyName: string;
+  sector: string | null;
   securityNumber: number | null;
   clientCount: number;
   totalQuantity: number;
@@ -40,6 +45,21 @@ export type FirmPortfolioStock = {
   unrealizedPl: number | null;
   returnPct: number | null;
   realizedPl: number;
+  /** Share of the firm's total market value held in this stock. */
+  stockPct: number | null;
+  /** Share of the firm's total market value held in this stock's sector. */
+  sectorPct: number | null;
+};
+
+/** Sector rollup for the firm-level sector chart (percentages computed server-side). */
+export type FirmPortfolioSector = {
+  sector: string;
+  stockCount: number;
+  totalCost: number;
+  marketValue: number | null;
+  unrealizedPl: number | null;
+  realizedPl: number;
+  sectorPct: number | null;
 };
 
 export type FirmPortfolioResult = {
@@ -47,6 +67,7 @@ export type FirmPortfolioResult = {
   accountTypeFilter: string;
   clientCount: number;
   stocks: FirmPortfolioStock[];
+  sectors: FirmPortfolioSector[];
   totals: {
     totalQuantity: number;
     totalCost: number;
@@ -60,6 +81,9 @@ export type FirmPortfolioDrilldown = {
   asOf: string;
   ticker: string;
   companyName: string;
+  sector: string | null;
+  /** Latest market price used for this stock (3 dp on screen). */
+  marketPrice: number | null;
   holders: FirmPortfolioHolder[];
   totals: {
     totalQuantity: number;
@@ -142,6 +166,7 @@ async function loadClientSlice(clientId: number, asOf: string): Promise<ClientSl
       holders.push({
         ticker,
         companyName: line.companyName,
+        sector: line.sectorName?.trim() || sector.sectorName?.trim() || null,
         clientId,
         clientName: portfolio.investor.displayName,
         nin: portfolio.investor.nin,
@@ -153,6 +178,7 @@ async function loadClientSlice(clientId: number, asOf: string): Promise<ClientSl
         unrealizedPl: unrealized == null ? null : round4(unrealized),
         returnPct: returnPctFromUnrealized(unrealized, cost),
         realizedPl: round4(realizedByTicker.get(ticker.toUpperCase()) ?? 0),
+        holderPct: null,
       });
     }
   }
@@ -185,6 +211,7 @@ export function aggregateFirmHolders(holders: FirmPortfolioHolder[]): FirmPortfo
     stocks.push({
       ticker: first.ticker,
       companyName: first.companyName,
+      sector: list.find((r) => r.sector)?.sector ?? null,
       securityNumber: null,
       clientCount: new Set(list.map((r) => r.clientId)).size,
       totalQuantity,
@@ -194,10 +221,99 @@ export function aggregateFirmHolders(holders: FirmPortfolioHolder[]): FirmPortfo
       unrealizedPl,
       returnPct: returnPctFromUnrealized(unrealizedPl, totalCost),
       realizedPl,
+      stockPct: null,
+      sectorPct: null,
     });
   }
   stocks.sort((a, b) => a.ticker.localeCompare(b.ticker));
-  return stocks;
+  return withFirmWeights(stocks);
+}
+
+const UNCLASSIFIED_SECTOR = "Unclassified";
+
+function share(part: number | null, whole: number): number | null {
+  if (part == null || !(whole > 0)) return null;
+  return roundPct((part / whole) * 100);
+}
+
+/**
+ * Stock % and sector % of the firm's total market value. Weights live here, not
+ * in the UI, so the table, the charts and the exports always agree.
+ */
+export function withFirmWeights(stocks: FirmPortfolioStock[]): FirmPortfolioStock[] {
+  const firmMarketValue = stocks.reduce((s, r) => s + (r.marketValue ?? 0), 0);
+  const bySector = new Map<string, number>();
+  for (const stock of stocks) {
+    const key = stock.sector?.trim() || UNCLASSIFIED_SECTOR;
+    bySector.set(key, (bySector.get(key) ?? 0) + (stock.marketValue ?? 0));
+  }
+  return stocks.map((stock) => ({
+    ...stock,
+    stockPct: share(stock.marketValue, firmMarketValue),
+    sectorPct: share(bySector.get(stock.sector?.trim() || UNCLASSIFIED_SECTOR) ?? null, firmMarketValue),
+  }));
+}
+
+/** Holder shares of one stock, for the holders chart in the drill-down. */
+export function withHolderWeights(holders: FirmPortfolioHolder[]): FirmPortfolioHolder[] {
+  const stockMarketValue = holders.reduce((s, r) => s + (r.marketValue ?? 0), 0);
+  return holders.map((holder) => ({ ...holder, holderPct: share(holder.marketValue, stockMarketValue) }));
+}
+
+/** Sector rollup used by the firm sector chart and the sector rows in exports. */
+export function aggregateFirmSectors(stocks: FirmPortfolioStock[]): FirmPortfolioSector[] {
+  const firmMarketValue = stocks.reduce((s, r) => s + (r.marketValue ?? 0), 0);
+  const groups = new Map<string, FirmPortfolioStock[]>();
+  for (const stock of stocks) {
+    const key = stock.sector?.trim() || UNCLASSIFIED_SECTOR;
+    const list = groups.get(key) ?? [];
+    list.push(stock);
+    groups.set(key, list);
+  }
+  const sectors: FirmPortfolioSector[] = [];
+  for (const [sector, list] of groups) {
+    const marketValue = list.every((s) => s.marketValue != null)
+      ? round4(list.reduce((s, r) => s + (r.marketValue ?? 0), 0))
+      : null;
+    const unrealizedPl = list.every((s) => s.unrealizedPl != null)
+      ? round4(list.reduce((s, r) => s + (r.unrealizedPl ?? 0), 0))
+      : null;
+    sectors.push({
+      sector,
+      stockCount: list.length,
+      totalCost: round4(list.reduce((s, r) => s + r.totalCost, 0)),
+      marketValue,
+      unrealizedPl,
+      realizedPl: round4(list.reduce((s, r) => s + r.realizedPl, 0)),
+      sectorPct: share(list.reduce((s, r) => s + (r.marketValue ?? 0), 0), firmMarketValue),
+    });
+  }
+  sectors.sort((a, b) => (b.marketValue ?? 0) - (a.marketValue ?? 0) || a.sector.localeCompare(b.sector));
+  return sectors;
+}
+
+const price3 = (n: number | null) =>
+  n == null ? "—" : n.toLocaleString("en-US", { minimumFractionDigits: 3, maximumFractionDigits: 3 });
+
+/** Header lines printed on the firm portfolio Excel and PDF exports. */
+export function firmPortfolioHeaderLines(report: FirmPortfolioResult): Array<{ label: string; value: string }> {
+  return [
+    { label: "As of", value: formatDmY(report.asOf) },
+    { label: "Account Type", value: report.accountTypeFilter },
+    { label: "Clients", value: String(report.clientCount) },
+    { label: "Stocks", value: String(report.stocks.length) },
+  ];
+}
+
+/** Header lines printed on the stock-holders Excel and PDF exports. */
+export function firmHoldersHeaderLines(drill: FirmPortfolioDrilldown): Array<{ label: string; value: string }> {
+  return [
+    { label: "Stock", value: `${drill.ticker} — ${drill.companyName}` },
+    { label: "Sector", value: drill.sector || "Unclassified" },
+    { label: "Market Price", value: price3(drill.marketPrice) },
+    { label: "As of", value: formatDmY(drill.asOf) },
+    { label: "Holders", value: String(drill.holders.length) },
+  ];
 }
 
 export function sumFirmStocks(stocks: FirmPortfolioStock[]) {
@@ -222,6 +338,7 @@ export async function getFirmInvestmentPortfolio(asOf: string): Promise<FirmPort
     accountTypeFilter: "INV PORT",
     clientCount: slices.length,
     stocks,
+    sectors: aggregateFirmSectors(stocks),
     totals: sumFirmStocks(stocks),
   };
 }
@@ -247,7 +364,9 @@ export async function getFirmInvestmentPortfolioDrilldown(
     asOf,
     ticker: stock.ticker,
     companyName: stock.companyName,
-    holders,
+    sector: stock.sector,
+    marketPrice: stock.marketPrice,
+    holders: withHolderWeights(holders),
     totals: {
       totalQuantity: stock.totalQuantity,
       totalCost: stock.totalCost,

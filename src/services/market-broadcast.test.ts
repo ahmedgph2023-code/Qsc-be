@@ -2,11 +2,12 @@
  * Phase 7 / meeting 3 — broadcast parser + status.
  * Live ticks must not write stock_prices except via persistSessionCloses (س-25).
  */
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   applyBroadcastPayload,
   getBroadcastStatus,
   getLiveLastPriceMap,
+  hubUrlCandidates,
   isBroadcastUrlConfigured,
   parseBroadcastPayload,
 } from "./market-broadcast.js";
@@ -45,10 +46,101 @@ describe("market broadcast", () => {
     expect(map.get("NLCS")).toBe(0.736);
   });
 
+  it("reads the executed-trade count under any of the feed's names", () => {
+    const withTrades = (row: Record<string, unknown>) => ({
+      Data: [{ objectName1: "MarketWatch", objectValue1: [{ symbol: "QNBK", lastTradePrice: "16.5", ...row }] }],
+    });
+    expect(parseBroadcastPayload(withTrades({ executed: "29" })).quotes[0]?.trades).toBe(29);
+    expect(parseBroadcastPayload(withTrades({ noOfTrades: "7" })).quotes[0]?.trades).toBe(7);
+    expect(parseBroadcastPayload(withTrades({ Trades: "34" })).quotes[0]?.trades).toBe(34);
+    expect(parseBroadcastPayload(withTrades({})).quotes[0]?.trades).toBeNull();
+  });
+
+  it("tries the LAN hub before the public hub and de-duplicates", () => {
+    const local = "http://192.168.41.201/qscapi/hub";
+    const publicUrl = "https://test.qatar-securities.com/qscapi/Hub";
+    expect(hubUrlCandidates({ BROADCAST_WS_URL: publicUrl, BROADCAST_WS_URL_LOCAL: local }))
+      .toEqual([local, publicUrl]);
+    expect(hubUrlCandidates({ BROADCAST_WS_URL: publicUrl })).toEqual([publicUrl]);
+    expect(hubUrlCandidates({ BROADCAST_WS_URL: publicUrl, BROADCAST_WS_URL_LOCAL: publicUrl })).toEqual([publicUrl]);
+    expect(hubUrlCandidates({})).toEqual([]);
+  });
+
+  it("reports the SignalR skip-negotiation transport when a hub is configured", () => {
+    const publicUrl = "https://test.qatar-securities.com/qscapi/Hub";
+    expect(getBroadcastStatus({ BROADCAST_WS_URL: publicUrl }).hubTransport).toBe("signalr_ws_skip_negotiation");
+    expect(getBroadcastStatus({ BROADCAST_WS_URL: publicUrl, BROADCAST_HUB_NEGOTIATE: "1" }).hubTransport)
+      .toBe("signalr_negotiate");
+    expect(getBroadcastStatus({ BROADCAST_WS_URL: "wss://feed.example/ws" }).hubTransport).toBe("websocket");
+    expect(getBroadcastStatus({}).hubTransport).toBeNull();
+  });
+
+  it("treats either hub URL as configured", () => {
+    expect(isBroadcastUrlConfigured({ BROADCAST_WS_URL_LOCAL: "http://192.168.41.201/qscapi/hub" })).toBe(true);
+    expect(isBroadcastUrlConfigured({})).toBe(false);
+  });
+
   it("reports idle without URL but does not claim JSON-sample block after meeting 3", () => {
     expect(isBroadcastUrlConfigured({})).toBe(false);
     const status = getBroadcastStatus({});
     expect(status.ingestOfficialCloses).toBe(false);
+  });
+
+  it("picks the broadcast envelope out of SignalR invocation arguments", async () => {
+    const { bestHubPayload } = await import("./market-broadcast.js");
+    // one object argument (meeting sample shape)
+    expect(parseBroadcastPayload(bestHubPayload([sample])).quotes).toHaveLength(2);
+    // JSON text argument
+    expect(parseBroadcastPayload(bestHubPayload([JSON.stringify(sample)])).quotes).toHaveLength(2);
+    // several arguments where only one carries the envelope
+    expect(parseBroadcastPayload(bestHubPayload(["QE", sample])).quotes).toHaveLength(2);
+    // Data array passed straight through
+    expect(parseBroadcastPayload(bestHubPayload([sample.Data])).quotes).toHaveLength(2);
+  });
+
+  it("marks a fresh Hub feed as trusted for valuation", () => {
+    applyBroadcastPayload(sample, "hub");
+    const status = getBroadcastStatus({});
+    expect(status.feedSource).toBe("hub");
+    expect(status.stale).toBe(false);
+    expect(status.valuationTrusted).toBe(true);
+    expect(getLiveLastPriceMap().get("MHAR")).toBe(2.508);
+  });
+
+  it("refuses to value portfolios from the sample feed", () => {
+    applyBroadcastPayload(sample, "sample");
+    const status = getBroadcastStatus({});
+    expect(status.feedSource).toBe("sample");
+    expect(status.valuationTrusted).toBe(false);
+    expect(status.blockedReason).toBe("UNTRUSTED_FEED");
+    expect(getLiveLastPriceMap().size).toBe(0);
+  });
+
+  it("treats a feed older than the stale window as disconnected and untrusted", () => {
+    applyBroadcastPayload(sample, "hub");
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date(Date.now() + 120_000));
+      const status = getBroadcastStatus({ BROADCAST_STALE_SECONDS: "60" });
+      expect(status.stale).toBe(true);
+      expect(status.feedAgeSeconds).toBeGreaterThan(60);
+      expect(status.connected).toBe(false);
+      expect(status.blockedReason).toBe("STALE_FEED");
+      expect(status.valuationSource).toBe("official_close");
+      expect(getLiveLastPriceMap().size).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("never mixes rows from two feeds on one board", () => {
+    applyBroadcastPayload(sample, "hub");
+    const hubCount = getBroadcastStatus({}).quoteCount;
+    expect(hubCount).toBe(2);
+    applyBroadcastPayload({ Data: [{ objectName2: "MarketWatch", objectValue2: [
+      { symbol: "QNBK", lastTradePrice: "14.5", closePrice: "14.4" },
+    ] }] }, "sample");
+    expect(getBroadcastStatus({}).quoteCount).toBe(1);
   });
 
   it("maps QSE public mw.php MarketWatch rows (PrevClosing / Trades / Volume / Value)", async () => {
@@ -78,13 +170,24 @@ describe("market broadcast", () => {
     expect(q?.totalValue).toBe(46176);
   });
 
-  it("simulateLiveTicks nudges last prices in memory without claiming DB writes", async () => {
+  it("simulateLiveTicks moves the board but poisons valuation so QA prices cannot reach NAV", async () => {
     const { simulateLiveTicks } = await import("./market-broadcast.js");
-    applyBroadcastPayload(sample);
+    applyBroadcastPayload(sample, "hub");
     const before = getLiveLastPriceMap().get("MHAR");
+    expect(before).toBeTypeOf("number");
     const { touched } = simulateLiveTicks(5);
     expect(touched.length).toBeGreaterThan(0);
-    expect(getLiveLastPriceMap().size).toBeGreaterThanOrEqual(2);
-    expect(before).toBeTypeOf("number");
+    const status = getBroadcastStatus({});
+    expect(status.syntheticTicks).toBe(true);
+    expect(status.valuationTrusted).toBe(false);
+    expect(getLiveLastPriceMap().size).toBe(0);
+  });
+
+  it("refuses to write official closes from an untrusted feed", async () => {
+    const { persistSessionCloses } = await import("./market-broadcast.js");
+    applyBroadcastPayload(sample, "sample");
+    const result = await persistSessionCloses("2026-09-17");
+    expect(result.written).toBe(0);
+    expect(result.skipped).toBe("FEED_SAMPLE");
   });
 });
